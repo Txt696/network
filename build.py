@@ -49,7 +49,8 @@ def verify(path):
     if not path.exists():
         print("!! не нашёл %s" % path)
         return False
-    result = subprocess.run([str(path), "--selftest"], capture_output=True, text=True)
+    result = subprocess.run([str(path), "--selftest"], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
     output = (result.stdout or result.stderr).strip()
     if output:
         print(output)
@@ -58,7 +59,15 @@ def verify(path):
     return ok
 
 
+def use_utf8():
+    """Печатать по-русски можно и в консоли Windows, где по умолчанию cp1252."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv=None):
+    use_utf8()
     parser = argparse.ArgumentParser(description="Сборка NetVault и NetMaster")
     parser.add_argument("apps", nargs="*", metavar="ПРОГРАММА",
                         help="netvault и/или netmaster (по умолчанию обе)")

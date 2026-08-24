@@ -11,6 +11,11 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # Консоль Windows по умолчанию cp1252 — русский текст в выводе ронял бы шаги.
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
     steps:
       - uses: actions/checkout@v4
 
