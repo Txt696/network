@@ -75,6 +75,30 @@ def _read_until_idle(channel, idle=0.7, timeout=30.0):
     return "".join(chunks)
 
 
+def connect_client(target, timeout=15):
+    """Подключиться к устройству по SSH и вернуть готовый клиент paramiko."""
+    import paramiko  # импорт здесь, чтобы модуль читался и без paramiko
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kwargs = {
+        "hostname": target.host,
+        "port": target.port,
+        "username": target.username,
+        "timeout": timeout,
+        "allow_agent": False,
+        "look_for_keys": False,
+    }
+    if target.key_file:
+        kwargs["key_filename"] = target.key_file
+        if target.key_passphrase:
+            kwargs["passphrase"] = target.key_passphrase
+    if target.password:
+        kwargs["password"] = target.password
+    client.connect(**kwargs)
+    return client
+
+
 class ParamikoSession:
     """Интерактивная SSH-сессия к одному устройству."""
 
@@ -85,27 +109,7 @@ class ParamikoSession:
         self.channel = None
 
     def open(self):
-        import paramiko  # импорт здесь, чтобы модуль читался и без paramiko
-
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        kwargs = {
-            "hostname": self.target.host,
-            "port": self.target.port,
-            "username": self.target.username,
-            "timeout": self.timeout,
-            "allow_agent": False,
-            "look_for_keys": False,
-        }
-        if self.target.key_file:
-            kwargs["key_filename"] = self.target.key_file
-            if self.target.key_passphrase:
-                kwargs["passphrase"] = self.target.key_passphrase
-            if self.target.password:
-                kwargs["password"] = self.target.password
-        else:
-            kwargs["password"] = self.target.password
-        client.connect(**kwargs)
+        client = connect_client(self.target, self.timeout)
         channel = client.invoke_shell(term="vt100", width=200, height=1000)
         channel.settimeout(self.timeout)
         self.client = client

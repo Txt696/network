@@ -22,11 +22,12 @@ class TerminalWidget(ttk.Frame):
     """Одна вкладка-сессия."""
 
     def __init__(self, parent, target=None, on_state_change=None,
-                 macros=None, on_edit_macros=None):
+                 macros=None, on_edit_macros=None, on_open_files=None):
         super().__init__(parent)
         self.target = target
         self.on_state_change = on_state_change
         self.on_edit_macros = on_edit_macros
+        self.on_open_files = on_open_files
         self.macros = list(macros or [])
         self.client = None
         self.connected = False
@@ -49,6 +50,9 @@ class TerminalWidget(ttk.Frame):
         self.status_label.pack(side=tk.LEFT)
         ttk.Label(bar, text="— печатайте прямо в окне").pack(side=tk.LEFT, padx=8)
         ttk.Button(bar, text="Отключить", command=self.disconnect).pack(side=tk.RIGHT, padx=2)
+        if self.on_open_files:
+            ttk.Button(bar, text="Файлы (SFTP)",
+                       command=lambda: self.on_open_files(self.target)).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Переподключить", command=self.connect).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Очистить", command=self.clear).pack(side=tk.RIGHT, padx=2)
 

@@ -16,6 +16,7 @@ from netmaster.core import macros, network_tools
 from netmaster.core.inventory import Inventory
 from netmaster.gui.bulk_dialog import BulkDialog
 from netmaster.gui.macros_dialog import MacrosDialog
+from netmaster.gui.sftp_panel import SftpPanel
 from netmaster.gui.terminal_widget import TerminalWidget
 from netmaster.gui.tools_dialog import ToolsDialog
 from netvault.gui.unlock_dialog import PasswordPrompt, UnlockDialog
@@ -83,6 +84,7 @@ class MainWindow:
         session_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Сессия", menu=session_menu)
         session_menu.add_command(label="Подключиться к выбранному", command=self.connect_selected)
+        session_menu.add_command(label="Файлы на устройстве (SFTP)…", command=self.open_files)
         session_menu.add_command(label="Закрыть вкладку", command=self.close_current_tab)
 
         bulk_menu = tk.Menu(menubar, tearoff=0)
@@ -294,13 +296,30 @@ class MainWindow:
         terminal = TerminalWidget(self.notebook, target=target,
                                   on_state_change=self._on_session_state,
                                   macros=macros.for_vendor(self.macros, target.vendor),
-                                  on_edit_macros=self.edit_macros)
+                                  on_edit_macros=self.edit_macros,
+                                  on_open_files=self.open_files)
         self.notebook.add(terminal, text=target.name)
         self.notebook.select(terminal)
         self.sessions[str(terminal)] = terminal
         terminal.connect()
         terminal.focus_terminal()
         self._update_status()
+
+    def open_files(self, target=None):
+        """Вкладка с файлами устройства по SFTP."""
+        if target is None:
+            targets = self._targets_for_selection()
+            if not targets:
+                return
+            target = targets[0]
+        if not target.has_credentials:
+            messagebox.showwarning(
+                APP_TITLE, "Для %s в хранилище нет логина/пароля." % target.name,
+                parent=self.root)
+            return
+        panel = SftpPanel(self.notebook, target)
+        self.notebook.add(panel, text="%s · файлы" % target.name)
+        self.notebook.select(panel)
 
     def _focus_current_tab(self, _event=None):
         terminal = self.sessions.get(str(self.notebook.select()))
@@ -318,6 +337,8 @@ class MainWindow:
         if isinstance(widget, TerminalWidget):
             widget.disconnect()
             self.sessions.pop(str(widget), None)
+        elif isinstance(widget, SftpPanel):
+            widget.close()
         self.notebook.forget(current)
         self._update_status()
 
