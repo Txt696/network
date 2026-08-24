@@ -193,15 +193,24 @@ class Vault:
             device.id = slugify(device.name)
         device.updated = now_stamp()
         target = self.device_path(device.id)
-        if rename_from and rename_from != device.id:
+        renaming = bool(rename_from) and rename_from != device.id
+        if renaming:
             old = self.device_path(rename_from)
             if target.exists():
                 raise VaultError("Устройство с id '%s' уже есть" % device.id)
-            if old.exists():
-                old.unlink()
-            if not self.secrets.is_locked and self.secrets.get(rename_from):
+            if self.secrets.is_locked:
+                # Пароли перенести нельзя, пока хранилище закрыто, — поэтому
+                # закрепляем ссылку на старый id прямо в заметке, чтобы запись
+                # доступов не осиротела.
+                if not device.secret:
+                    device.secret = rename_from
+            elif self.secrets.get(rename_from):
                 self.secrets.rename(rename_from, device.secret_ref)
+        # Сначала новый файл, и только потом удаление старого: если запись
+        # сорвётся, устройство останется на диске под прежним именем.
         _atomic_write_text(target, device.to_markdown())
+        if renaming and old.exists():
+            old.unlink()
         self.log(device.id, "saved", {"name": device.name, "ip": device.mgmt_ip})
         return target
 
