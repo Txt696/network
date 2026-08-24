@@ -108,6 +108,12 @@ python netmaster/cli.py run --device core-sw-01 "show run" --enable
 Мастер-пароль спрашивается интерактивно; для автоматизации его можно передать
 переменной `NETVAULT_PASSWORD`.
 
+## Тесты
+
+```bash
+python -m unittest discover -s tests
+```
+
 ## Структура кода
 
 ```

@@ -14,15 +14,71 @@ _NEEDS_QUOTES = re.compile(r"^\s|\s$|^[\[\]{}>|*&!%@`#-]|:\s|^$")
 _BOOL_LIKE = {"true", "false", "yes", "no", "null", "~", "on", "off"}
 
 
+_ESCAPES = {"\\": "\\", '"': '"', "/": "/", "n": "\n", "t": "\t", "r": "\r", "0": "\0"}
+
+
+def _unquote(text):
+    """Снять кавычки и раскрыть экранирование — так же, как их ставит _format_scalar."""
+    body = text[1:-1]
+    if text[0] == "'":
+        return body.replace("''", "'")
+    out = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            out.append(_ESCAPES.get(nxt, "\\" + nxt))
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _split_inline(inner):
+    """Разбить содержимое inline-списка по запятым, не трогая запятые в кавычках."""
+    items, current, quote, escaped = [], [], "", False
+    for ch in inner:
+        if escaped:
+            current.append(ch)
+            escaped = False
+            continue
+        if quote:
+            if ch == "\\" and quote == '"':
+                current.append(ch)
+                escaped = True
+            elif ch == quote:
+                quote = ""
+                current.append(ch)
+            else:
+                current.append(ch)
+            continue
+        if ch in "\"'":
+            quote = ch
+            current.append(ch)
+        elif ch == ",":
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    items.append("".join(current))
+    return items
+
+
+def _is_quoted(text):
+    return len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'"
+
+
 def _parse_scalar(text):
     text = text.strip()
     if not text:
         return ""
-    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
-        return text[1:-1]
+    if _is_quoted(text):
+        return _unquote(text)
     if text.startswith("[") and text.endswith("]"):
         inner = text[1:-1].strip()
-        return [_parse_scalar(x) for x in inner.split(",")] if inner else []
+        return [_parse_scalar(x) for x in _split_inline(inner)] if inner else []
     low = text.lower()
     if low in ("true", "yes"):
         return True

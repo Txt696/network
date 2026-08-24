@@ -53,7 +53,7 @@ class MainWindow:
             self.refresh_tree()
             if autoconnect_device:
                 self.connect_device(autoconnect_device)
-        self._update_status()
+        self._tick()
 
     # ------------------------------------------------------------- интерфейс
     def _setup_style(self):
@@ -391,6 +391,19 @@ class MainWindow:
         ToolsDialog(self.root, devices[0].target if devices else "")
 
     # ---------------------------------------------------------------- сервис
+    def _tick(self):
+        """Раз в 15 секунд: автоблокировка хранилища и обновление статуса.
+
+        Пароли не должны оставаться расшифрованными в памяти, пока
+        NetMaster просто открыт на рабочем столе.
+        """
+        if self.inventory and not self.inventory.is_locked:
+            vault = self.inventory.vault
+            if vault.secrets.maybe_autolock(vault.autolock_seconds()):
+                self.status_label.config(text="Хранилище заблокировано по бездействию")
+        self._update_status()
+        self.root.after(15000, self._tick)
+
     def _update_status(self):
         active = sum(1 for t in self.sessions.values() if t.connected)
         self.status_label.config(text="Устройств: %d | Сессий: %d (активных: %d)" % (
