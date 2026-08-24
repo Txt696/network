@@ -43,6 +43,46 @@ class AnsiTest(unittest.TestCase):
         self.assertEqual(ansi.ctrl_code("1"), "")
 
 
+class KeyDataTest(unittest.TestCase):
+    """Что уходит на устройство по нажатой клавише."""
+
+    def setUp(self):
+        self.alt = ansi.ALT_MASK
+        self.numlock = 0x8  # на Windows этим битом помечается NumLock
+
+    def windows(self):
+        """Подменить маску Alt на windows-вариант."""
+        ansi.ALT_MASK = 0x20000
+        self.addCleanup(setattr, ansi, "ALT_MASK", self.alt)
+
+    def test_plain_character(self):
+        self.assertEqual(ansi.key_data("a", "a", 0), "a")
+
+    def test_special_keys(self):
+        self.assertEqual(ansi.key_data("Return", "\r", 0), "\r")
+        self.assertEqual(ansi.key_data("Up", "", 0), "\x1b[A")
+        self.assertEqual(ansi.key_data("BackSpace", "\x08", 0), "\x7f")
+
+    def test_modifier_alone_sends_nothing(self):
+        self.assertEqual(ansi.key_data("Shift_L", "", 0), "")
+
+    def test_control_letter(self):
+        self.assertEqual(ansi.key_data("c", "\x03", ansi.CONTROL_MASK), "\x03")
+
+    def test_alt_is_left_to_the_system(self):
+        self.assertIsNone(ansi.key_data("f", "f", ansi.ALT_MASK))
+
+    def test_numlock_does_not_block_input_on_windows(self):
+        """С включённым NumLock на Windows ввод должен работать."""
+        self.windows()
+        self.assertEqual(ansi.key_data("a", "a", self.numlock), "a")
+        self.assertEqual(ansi.key_data("Return", "\r", self.numlock), "\r")
+
+    def test_windows_alt_is_still_recognised(self):
+        self.windows()
+        self.assertIsNone(ansi.key_data("f", "f", 0x20000))
+
+
 class MacrosTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

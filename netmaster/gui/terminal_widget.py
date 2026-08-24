@@ -22,11 +22,12 @@ class TerminalWidget(ttk.Frame):
     """Одна вкладка-сессия."""
 
     def __init__(self, parent, target=None, on_state_change=None,
-                 macros=None, on_edit_macros=None):
+                 macros=None, on_edit_macros=None, on_open_files=None):
         super().__init__(parent)
         self.target = target
         self.on_state_change = on_state_change
         self.on_edit_macros = on_edit_macros
+        self.on_open_files = on_open_files
         self.macros = list(macros or [])
         self.client = None
         self.connected = False
@@ -47,7 +48,11 @@ class TerminalWidget(ttk.Frame):
         bar.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
         self.status_label = ttk.Label(bar, text="Не подключено", style="Disconnected.TLabel")
         self.status_label.pack(side=tk.LEFT)
+        ttk.Label(bar, text="— печатайте прямо в окне").pack(side=tk.LEFT, padx=8)
         ttk.Button(bar, text="Отключить", command=self.disconnect).pack(side=tk.RIGHT, padx=2)
+        if self.on_open_files:
+            ttk.Button(bar, text="Файлы (SFTP)",
+                       command=lambda: self.on_open_files(self.target)).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Переподключить", command=self.connect).pack(side=tk.RIGHT, padx=2)
         ttk.Button(bar, text="Очистить", command=self.clear).pack(side=tk.RIGHT, padx=2)
 
@@ -56,19 +61,27 @@ class TerminalWidget(ttk.Frame):
         self._build_macro_bar()
 
         self.output = tk.Text(self, bg="#1e1e1e", fg="#d4d4d4", insertbackground="#ffffff",
-                              font=("Consolas", 10), wrap=tk.NONE, undo=False, takefocus=True)
+                              font=("Consolas", 10), wrap=tk.NONE, undo=False, takefocus=True,
+                              highlightthickness=2, highlightbackground="#1e1e1e",
+                              highlightcolor="#569cd6")
         scroll = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.output.yview)
-        self.output.configure(yscrollcommand=scroll.set, state=tk.DISABLED)
+        self.output.configure(yscrollcommand=scroll.set)
         self.output.grid(row=2, column=0, sticky="nsew", padx=(2, 0), pady=2)
         scroll.grid(row=2, column=1, sticky="ns", pady=2)
         self.output.tag_configure("system", foreground="#569cd6")
         self.output.tag_configure("error", foreground="#f48771")
 
         # Ввод прямо в области вывода: символы уходят на устройство,
-        # локально ничего не вставляем — эхо придёт от него же.
+        # локально ничего не вставляем — эхо придёт от него же. Виджет
+        # оставлен редактируемым (иначе Tk не отдаёт ему фокус по клику),
+        # но все клавиши и вставки перехвачены.
         self.output.bind("<Key>", self._on_key)
-        self.output.bind("<Button-1>", lambda e: self.output.focus_set())
+        self.output.bind("<Button-1>", self._focus_click)
+        self.output.bind("<Button-2>", self._paste)
         self.output.bind("<Button-3>", self._paste)
+        self.output.bind("<<Paste>>", self._paste)
+        self.output.bind("<<Cut>>", lambda e: "break")
+        self.output.bind("<<Clear>>", lambda e: "break")
 
         entry_frame = ttk.Frame(self)
         entry_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
@@ -101,6 +114,11 @@ class TerminalWidget(ttk.Frame):
         self._build_macro_bar()
 
     def focus_terminal(self):
+        """Отдать клавиатуру чёрной области — туда и печатает пользователь."""
+        self.output.focus_set()
+        self.output.mark_set("insert", tk.END)
+
+    def _focus_click(self, _event=None):
         self.output.focus_set()
 
     # ------------------------------------------------------------ соединение
@@ -166,27 +184,18 @@ class TerminalWidget(ttk.Frame):
     # ---------------------------------------------------------------- ввод
     def _on_key(self, event):
         """Клавиша нажата в области вывода — отправить её на устройство."""
-        if event.state & 0x20008:  # Alt — оставляем системе (меню, Alt+F4)
+        if event.state & ansi.CONTROL_MASK and not event.state & ansi.ALT_MASK:
+            key = event.keysym.lower()
+            if key == "c" and self.output.tag_ranges("sel"):
+                self._copy_selection()  # есть выделение — копируем, как в PuTTY
+                return "break"
+            if key in ("v", "insert"):
+                return self._paste()
+        data = ansi.key_data(event.keysym, event.char, event.state)
+        if data is None:  # нажат Alt — это меню, а не ввод
             return None
-        if event.state & 0x4:  # Control
-            return self._on_control_key(event)
-        data = ansi.KEYS.get(event.keysym)
-        if data is None:
-            data = event.char
         if data:
             self._send_raw(data)
-        return "break"
-
-    def _on_control_key(self, event):
-        key = event.keysym.lower()
-        if key == "c" and self.output.tag_ranges("sel"):
-            self._copy_selection()  # есть выделение — копируем, как в PuTTY
-            return "break"
-        if key in ("v", "insert"):
-            return self._paste()
-        code = ansi.ctrl_code(key)
-        if code:
-            self._send_raw(code)
         return "break"
 
     def _copy_selection(self):
@@ -268,34 +277,29 @@ class TerminalWidget(ttk.Frame):
     def _write_output(self, text):
         """Вывод устройства: с забоем, возвратом каретки и без ANSI-мусора."""
         done, current = ansi.apply_edits(self._line, ansi.clean(text))
-        self.output.config(state=tk.NORMAL)
         if self._line:
             self.output.delete("end-1c linestart", "end-1c")
         self.output.insert(tk.END, "".join(done) + current)
         self._line = current
         self._trim()
-        self.output.config(state=tk.DISABLED)
 
     def _write(self, text, tag=None):
         """Сообщение самой программы (подключение, ошибки)."""
-        self.output.config(state=tk.NORMAL)
         if self._line:
             self.output.insert(tk.END, "\n")
             self._line = ""
         self.output.insert(tk.END, text, tag or ())
         self._trim()
-        self.output.config(state=tk.DISABLED)
 
     def _trim(self):
         line_count = int(self.output.index("end-1c").split(".")[0])
         if line_count > MAX_LINES:
             self.output.delete("1.0", "%d.0" % (line_count - MAX_LINES))
+        self.output.mark_set("insert", tk.END)
         self.output.see(tk.END)
 
     def clear(self):
-        self.output.config(state=tk.NORMAL)
         self.output.delete("1.0", tk.END)
-        self.output.config(state=tk.DISABLED)
         self._line = ""
 
     def get_text(self):
