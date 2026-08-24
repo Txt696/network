@@ -7,27 +7,20 @@ import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from netmaster.core import runner
-
-PRESETS = {
-    "Cisco: версия и инвентарь": "show version\nshow inventory",
-    "Cisco: конфигурация": "show running-config",
-    "Cisco: интерфейсы": "show ip interface brief\nshow interfaces status",
-    "Cisco: соседи": "show cdp neighbors detail",
-    "Cisco: VLAN и MAC": "show vlan brief\nshow mac address-table",
-    "Linux: состояние": "uname -a\nuptime\ndf -h\nfree -m",
-}
+from netmaster.core import macros, runner
 
 
 class BulkDialog(tk.Toplevel):
     """Окно массовых операций."""
 
-    def __init__(self, parent, inventory, targets, title="Массовое выполнение команд"):
+    def __init__(self, parent, inventory, targets, macros_items=None,
+                 title="Массовое выполнение команд"):
         super().__init__(parent)
         self.title(title)
         self.geometry("900x640")
         self.inventory = inventory
         self.targets = list(targets)
+        self.macros = macros_items if macros_items is not None else macros.load()
         self.results = []
         self.stop_event = threading.Event()
         self.save_var = tk.BooleanVar(value=True)
@@ -51,7 +44,8 @@ class BulkDialog(tk.Toplevel):
         preset_frame = ttk.Frame(self, padding=(8, 0))
         preset_frame.pack(fill=tk.X)
         ttk.Label(preset_frame, text="Шаблон:").pack(side=tk.LEFT)
-        self.preset = ttk.Combobox(preset_frame, values=list(PRESETS), state="readonly", width=32)
+        self.preset = ttk.Combobox(preset_frame, values=[self._label(m) for m in self.macros],
+                                   state="readonly", width=32)
         self.preset.pack(side=tk.LEFT, padx=4)
         self.preset.bind("<<ComboboxSelected>>", self._apply_preset)
 
@@ -94,10 +88,16 @@ class BulkDialog(tk.Toplevel):
         self.result_text.pack(fill=tk.BOTH, expand=True)
         self.result_text.config(state=tk.DISABLED)
 
+    @staticmethod
+    def _label(item):
+        return "%s: %s" % (item["vendor"] or "любой", item["name"])
+
     def _apply_preset(self, _event=None):
-        text = PRESETS.get(self.preset.get(), "")
+        chosen = self.preset.current()
+        if chosen < 0:
+            return
         self.commands.delete("1.0", tk.END)
-        self.commands.insert("1.0", text)
+        self.commands.insert("1.0", macros.as_text(self.macros[chosen]))
 
     # ---------------------------------------------------------------- запуск
     def run(self):
