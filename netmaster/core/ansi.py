@@ -7,11 +7,18 @@
 """
 
 import re
+import sys
 
 # Управляющие последовательности: цвета, перемещения курсора, заголовок окна.
 _CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _SINGLE = re.compile(r"\x1b[()][B0]|\x1b[=>]")
+
+CONTROL_MASK = 0x4
+# Alt по-разному помечается на разных системах: на Windows это отдельный бит,
+# а Mod1 (0x8) там занят NumLock — если проверять 0x8, с включённым NumLock
+# ввод в терминал перестаёт работать.
+ALT_MASK = 0x20000 if sys.platform == "win32" else 0x8
 
 # Клавиша Tk -> что уходит в канал.
 KEYS = {
@@ -69,3 +76,18 @@ def apply_edits(line, text):
         else:
             current += char
     return done, current
+
+
+def key_data(keysym, char, state):
+    """
+    Что отправить на устройство по нажатой клавише.
+
+    None — событие не наше (нажат Alt), пусть его обработает система.
+    Пустая строка — отправлять нечего (Shift, Caps и прочие модификаторы).
+    """
+    if state & ALT_MASK:
+        return None
+    if state & CONTROL_MASK:
+        return ctrl_code(keysym)
+    data = KEYS.get(keysym)
+    return char if data is None else data

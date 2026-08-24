@@ -146,6 +146,8 @@ class MainWindow:
         paned.add(right, weight=3)
         self.notebook = ttk.Notebook(right)
         self.notebook.pack(fill=tk.BOTH, expand=True)
+        # При переходе на вкладку клавиатура сразу уходит в терминал.
+        self.notebook.bind("<<NotebookTabChanged>>", self._focus_current_tab)
 
         welcome = ttk.Frame(self.notebook)
         self.notebook.add(welcome, text="Начало")
@@ -299,6 +301,11 @@ class MainWindow:
         terminal.connect()
         terminal.focus_terminal()
         self._update_status()
+
+    def _focus_current_tab(self, _event=None):
+        terminal = self.sessions.get(str(self.notebook.select()))
+        if terminal:
+            terminal.focus_terminal()
 
     def _on_session_state(self, _terminal, _connected):
         self._update_status()
