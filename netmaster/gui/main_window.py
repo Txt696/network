@@ -12,9 +12,10 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from netcore.secretstore import LockedError
-from netmaster.core import network_tools
+from netmaster.core import macros, network_tools
 from netmaster.core.inventory import Inventory
 from netmaster.gui.bulk_dialog import BulkDialog
+from netmaster.gui.macros_dialog import MacrosDialog
 from netmaster.gui.terminal_widget import TerminalWidget
 from netmaster.gui.tools_dialog import ToolsDialog
 from netvault.gui.unlock_dialog import PasswordPrompt, UnlockDialog
@@ -37,6 +38,7 @@ class MainWindow:
         self.inventory = Inventory(vault) if vault else None
         self.devices = []
         self.sessions = {}
+        self.macros = macros.load(vault)
         self.search_var = tk.StringVar()
 
         self._setup_style()
@@ -93,6 +95,7 @@ class MainWindow:
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Инструменты", menu=tools_menu)
         tools_menu.add_command(label="Сетевые утилиты…", command=self.open_tools)
+        tools_menu.add_command(label="Наборы команд…", command=self.edit_macros)
 
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Справка", menu=help_menu)
@@ -287,11 +290,14 @@ class MainWindow:
                 % target.name, parent=self.root)
             return
         terminal = TerminalWidget(self.notebook, target=target,
-                                  on_state_change=self._on_session_state)
+                                  on_state_change=self._on_session_state,
+                                  macros=macros.for_vendor(self.macros, target.vendor),
+                                  on_edit_macros=self.edit_macros)
         self.notebook.add(terminal, text=target.name)
         self.notebook.select(terminal)
         self.sessions[str(terminal)] = terminal
         terminal.connect()
+        terminal.focus_terminal()
         self._update_status()
 
     def _on_session_state(self, _terminal, _connected):
@@ -321,13 +327,13 @@ class MainWindow:
     def bulk_commands(self):
         targets = self._targets_for_selection()
         if targets:
-            BulkDialog(self.root, self.inventory, targets)
+            BulkDialog(self.root, self.inventory, targets, macros_items=self.macros)
 
     def collect_configs(self):
         targets = self._targets_for_selection()
         if not targets:
             return
-        dialog = BulkDialog(self.root, self.inventory, targets,
+        dialog = BulkDialog(self.root, self.inventory, targets, macros_items=self.macros,
                             title="Сбор конфигураций в хранилище")
         vendors = {t.vendor.split()[0] if t.vendor else "" for t in targets}
         command = None
@@ -385,6 +391,19 @@ class MainWindow:
                     "открыт" if open_ports else "закрыт")
                 window.after(0, lambda t=line: (output.insert(tk.END, t), output.see(tk.END)))
         threading.Thread(target=work, daemon=True).start()
+
+    def edit_macros(self):
+        """Правка сохранённых наборов команд; открытые сессии обновляются сразу."""
+        if not self.inventory:
+            messagebox.showinfo(APP_TITLE, "Сначала откройте хранилище", parent=self.root)
+            return
+        MacrosDialog(self.root, self.inventory.vault, on_saved=self._apply_macros)
+
+    def _apply_macros(self, items):
+        self.macros = items
+        for terminal in self.sessions.values():
+            vendor = terminal.target.vendor if terminal.target else ""
+            terminal.set_macros(macros.for_vendor(items, vendor))
 
     def open_tools(self):
         devices = self.selected_devices()
