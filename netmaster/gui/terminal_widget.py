@@ -1,200 +1,189 @@
 """
-Terminal widget module for NetMaster.
-Provides terminal emulation with SSH/Telnet support.
+Виджет терминала: интерактивная SSH-сессия к устройству из хранилища.
 
-For Ali - Network Engineer
+Логин и пароль берутся из NetVault, руками ничего вводить не нужно.
 """
 
-import tkinter as tk
-from tkinter import ttk, scrolledtext
-import threading
 import queue
+import threading
+import tkinter as tk
+from tkinter import ttk
+
+MAX_LINES = 5000  # сколько строк держим в буфере вывода
+
 
 class TerminalWidget(ttk.Frame):
-    """Terminal emulator widget with session management."""
-    
-    def __init__(self, parent, session_id=0):
+    """Одна вкладка-сессия."""
+
+    def __init__(self, parent, target=None, on_state_change=None):
         super().__init__(parent)
-        self.session_id = session_id
+        self.target = target
+        self.on_state_change = on_state_change
+        self.client = None
         self.connected = False
-        self.session = None  # Will hold SSH/Telnet session
-        self.output_queue = queue.Queue()
-        
-        self._setup_ui()
-        self._bind_events()
-        self._start_output_processor()
-    
-    def _setup_ui(self):
-        """Setup terminal UI components."""
-        # Configure grid weights
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1)
-        
-        # Terminal text area with dark theme
-        self.terminal = scrolledtext.ScrolledText(
-            self,
-            bg='#1e1e1e',
-            fg='#d4d4d4',
-            insertbackground='#ffffff',
-            font=('Consolas', 11),
-            wrap=tk.NONE,
-            undo=True,
-            autoseparators=True
-        )
-        self.terminal.grid(row=0, column=0, sticky='nsew', padx=2, pady=2)
-        
-        # Configure text tags for colors
-        self.terminal.tag_configure('prompt', foreground='#4EC9B0')
-        self.terminal.tag_configure('output', foreground='#d4d4d4')
-        self.terminal.tag_configure('error', foreground='#f48771')
-        self.terminal.tag_configure('warning', foreground='#dcdcaa')
-        self.terminal.tag_configure('success', foreground='#6a9955')
-        self.terminal.tag_configure('info', foreground='#569cd6')
-        
-        # Command input line
-        self.input_frame = ttk.Frame(self)
-        self.input_frame.grid(row=1, column=0, sticky='ew', padx=2, pady=2)
-        
-        ttk.Label(self.input_frame, text="$", width=3).pack(side=tk.LEFT)
-        self.command_entry = ttk.Entry(self.input_frame, font=('Consolas', 11))
-        self.command_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
-        # Connection status indicator
-        self.status_label = ttk.Label(
-            self, 
-            text="Disconnected", 
-            style='Disconnected.TLabel'
-        )
-        self.status_label.grid(row=0, column=1, sticky='ne', padx=5, pady=5)
-    
-    def _bind_events(self):
-        """Bind keyboard and mouse events."""
-        self.command_entry.bind('<Return>', self._send_command)
-        self.command_entry.bind('<Tab>', self._auto_complete)
-        self.terminal.bind('<Key>', self._on_key_press)
-        
-        # Context menu
-        self.context_menu = tk.Menu(self, tearoff=0)
-        self.context_menu.add_command(label="Copy", command=self._copy)
-        self.context_menu.add_command(label="Paste", command=self._paste)
-        self.context_menu.add_separator()
-        self.context_menu.add_command(label="Clear", command=self._clear_terminal)
-        self.context_menu.add_command(label="Select All", command=self._select_all)
-        
-        self.terminal.bind('<Button-3>', self._show_context_menu)
-    
-    def _show_context_menu(self, event):
-        """Show context menu on right-click."""
-        self.context_menu.post(event.x_root, event.y_root)
-    
-    def _send_command(self, event=None):
-        """Send command to terminal session."""
-        command = self.command_entry.get().strip()
-        if command and self.connected:
-            self._write(f"$ {command}\n", 'prompt')
-            self.command_entry.delete(0, tk.END)
-            
-            # Send command to session (will be implemented with paramiko)
-            threading.Thread(target=self._execute_command, args=(command,), daemon=True).start()
-        elif not self.connected:
-            self._write("Not connected. Use Connect menu to establish session.\n", 'error')
-            self.command_entry.delete(0, tk.END)
-    
-    def _execute_command(self, command):
-        """Execute command in session (placeholder)."""
-        # This will integrate with paramiko for SSH
+        self.history = []
+        self.history_index = 0
+        self._queue = queue.Queue()
+
+        self._build_ui()
+        self._poll_output()
+
+    # ------------------------------------------------------------ интерфейс
+    def _build_ui(self):
+        self.rowconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        bar = ttk.Frame(self)
+        bar.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
+        self.status_label = ttk.Label(bar, text="Не подключено", style="Disconnected.TLabel")
+        self.status_label.pack(side=tk.LEFT)
+        ttk.Button(bar, text="Отключить", command=self.disconnect).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Переподключить", command=self.connect).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(bar, text="Очистить", command=self.clear).pack(side=tk.RIGHT, padx=2)
+
+        self.output = tk.Text(self, bg="#1e1e1e", fg="#d4d4d4", insertbackground="#ffffff",
+                              font=("Consolas", 10), wrap=tk.NONE, undo=False)
+        scroll = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.output.yview)
+        self.output.configure(yscrollcommand=scroll.set, state=tk.DISABLED)
+        self.output.grid(row=1, column=0, sticky="nsew", padx=(2, 0), pady=2)
+        scroll.grid(row=1, column=1, sticky="ns", pady=2)
+        self.output.tag_configure("system", foreground="#569cd6")
+        self.output.tag_configure("error", foreground="#f48771")
+
+        entry_frame = ttk.Frame(self)
+        entry_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
+        ttk.Label(entry_frame, text=">").pack(side=tk.LEFT)
+        self.command_entry = ttk.Entry(entry_frame, font=("Consolas", 10))
+        self.command_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        self.command_entry.bind("<Return>", self._send_command)
+        self.command_entry.bind("<Up>", self._history_prev)
+        self.command_entry.bind("<Down>", self._history_next)
+        self.command_entry.bind("<Control-c>", lambda e: self._send_raw("\x03"))
+        ttk.Button(entry_frame, text="Отправить", command=self._send_command).pack(side=tk.LEFT)
+
+    # ------------------------------------------------------------ соединение
+    def connect(self):
+        """Подключиться к устройству в фоновом потоке."""
+        if self.connected or not self.target:
+            return
+        if not self.target.host:
+            self._write("У устройства не указан адрес.\n", "error")
+            return
+        self._write("Подключение к %s@%s:%s …\n" % (
+            self.target.username or "?", self.target.host, self.target.port), "system")
+        threading.Thread(target=self._connect_worker, daemon=True).start()
+
+    def _connect_worker(self):
+        from netmaster.core.runner import ParamikoSession
+
+        session = ParamikoSession(self.target)
         try:
-            # Simulate command execution
-            import time
-            time.sleep(0.5)
-            response = f"Command '{command}' executed successfully.\n"
-            self.output_queue.put((response, 'output'))
-        except Exception as e:
-            self.output_queue.put((f"Error: {str(e)}\n", 'error'))
-    
-    def _start_output_processor(self):
-        """Start background thread to process output queue."""
-        def process():
-            while True:
-                try:
-                    msg, tag = self.output_queue.get(timeout=0.1)
-                    self._write(msg, tag)
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    print(f"Output processor error: {e}")
-        
-        threading.Thread(target=process, daemon=True).start()
-    
-    def _write(self, text, tag='output'):
-        """Write text to terminal with specified tag."""
-        self.terminal.insert(tk.END, text, tag)
-        self.terminal.see(tk.END)
-    
-    def _on_key_press(self, event):
-        """Handle key press events."""
-        # Prevent default behavior for certain keys
-        if event.keysym == 'Tab':
-            return 'break'
-    
-    def _auto_complete(self, event):
-        """Auto-complete command (placeholder)."""
-        # Will implement command auto-completion
-        return 'break'
-    
-    def _copy(self):
-        """Copy selected text."""
-        try:
-            text = self.terminal.selection_get()
-            self.clipboard_clear()
-            self.clipboard_append(text)
-        except tk.TclError:
-            pass  # No selection
-    
-    def _paste(self):
-        """Paste from clipboard."""
-        try:
-            text = self.clipboard_get()
-            self.command_entry.insert(tk.END, text)
-        except tk.TclError:
-            pass  # Clipboard empty
-    
-    def _clear_terminal(self):
-        """Clear terminal screen."""
-        self.terminal.delete('1.0', tk.END)
-        self._write("Terminal cleared.\n", 'info')
-    
-    def _select_all(self):
-        """Select all text."""
-        self.terminal.tag_add(tk.SEL, '1.0', tk.END)
-        return 'break'
-    
-    def connect(self, host, port=22, username='', password='', key_file=None):
-        """Establish SSH/Telnet connection."""
-        # Will integrate with paramiko
-        self._write(f"Connecting to {host}:{port}...\n", 'info')
-        
-        def do_connect():
+            session.open()
+        except Exception as exc:
+            self._queue.put(("error", "Не удалось подключиться: %s\n" % exc))
+            self._queue.put(("state", False))
+            return
+        self.client = session
+        self._queue.put(("state", True))
+        self._queue.put(("system", "Соединение установлено.\n"))
+        channel = session.channel
+        while True:
             try:
-                # Placeholder for actual connection
-                import time
-                time.sleep(1)
-                self.connected = True
-                self.output_queue.put((f"Connected to {host}\n", 'success'))
-                self.status_label.config(text="Connected", style='Connected.TLabel')
-            except Exception as e:
-                self.output_queue.put((f"Connection failed: {str(e)}\n", 'error'))
-        
-        threading.Thread(target=do_connect, daemon=True).start()
-    
+                if channel.closed:
+                    break
+                if channel.recv_ready():
+                    data = channel.recv(65535).decode("utf-8", errors="replace")
+                    if not data:
+                        break
+                    self._queue.put(("output", data))
+                else:
+                    threading.Event().wait(0.05)
+            except Exception:
+                break
+        self._queue.put(("system", "\nСоединение закрыто.\n"))
+        self._queue.put(("state", False))
+
     def disconnect(self):
-        """Close current session."""
-        if self.connected:
-            self.connected = False
-            self.session = None
-            self._write("Session disconnected.\n", 'warning')
-            self.status_label.config(text="Disconnected", style='Disconnected.TLabel')
-    
-    def is_connected(self):
-        """Check if session is active."""
-        return self.connected
+        if self.client:
+            self.client.close()
+            self.client = None
+        self.connected = False
+        self._set_state(False)
+
+    def _set_state(self, connected):
+        self.connected = connected
+        self.status_label.config(
+            text="Подключено: %s" % self.target.describe() if connected and self.target
+            else "Не подключено",
+            style="Connected.TLabel" if connected else "Disconnected.TLabel")
+        if self.on_state_change:
+            self.on_state_change(self, connected)
+
+    # ---------------------------------------------------------------- ввод
+    def _send_command(self, _event=None):
+        command = self.command_entry.get()
+        self.command_entry.delete(0, tk.END)
+        if command:
+            self.history.append(command)
+            self.history_index = len(self.history)
+        self._send_raw(command + "\n")
+
+    def _send_raw(self, data):
+        if not (self.connected and self.client and self.client.channel):
+            self._write("Нет активного подключения.\n", "error")
+            return
+        try:
+            self.client.channel.send(data)
+        except Exception as exc:
+            self._write("Ошибка отправки: %s\n" % exc, "error")
+
+    def send_line(self, command):
+        """Отправить команду программно (из массовых операций и меню)."""
+        self._send_raw(command + "\n")
+
+    def _history_prev(self, _event=None):
+        if self.history and self.history_index > 0:
+            self.history_index -= 1
+            self.command_entry.delete(0, tk.END)
+            self.command_entry.insert(0, self.history[self.history_index])
+        return "break"
+
+    def _history_next(self, _event=None):
+        if self.history and self.history_index < len(self.history) - 1:
+            self.history_index += 1
+            self.command_entry.delete(0, tk.END)
+            self.command_entry.insert(0, self.history[self.history_index])
+        else:
+            self.command_entry.delete(0, tk.END)
+        return "break"
+
+    # --------------------------------------------------------------- вывод
+    def _poll_output(self):
+        """Забирать данные из фонового потока в интерфейс."""
+        try:
+            while True:
+                kind, payload = self._queue.get_nowait()
+                if kind == "state":
+                    self._set_state(payload)
+                else:
+                    self._write(payload, None if kind == "output" else kind)
+        except queue.Empty:
+            pass
+        self.after(60, self._poll_output)
+
+    def _write(self, text, tag=None):
+        self.output.config(state=tk.NORMAL)
+        self.output.insert(tk.END, text, tag or ())
+        line_count = int(self.output.index("end-1c").split(".")[0])
+        if line_count > MAX_LINES:
+            self.output.delete("1.0", "%d.0" % (line_count - MAX_LINES))
+        self.output.see(tk.END)
+        self.output.config(state=tk.DISABLED)
+
+    def clear(self):
+        self.output.config(state=tk.NORMAL)
+        self.output.delete("1.0", tk.END)
+        self.output.config(state=tk.DISABLED)
+
+    def get_text(self):
+        return self.output.get("1.0", tk.END)
