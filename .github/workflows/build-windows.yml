@@ -1,0 +1,51 @@
+name: Сборка программ для Windows
+
+# Запуск вручную (вкладка Actions → Run workflow) и автоматически по тегу вида v1.0.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Прогнать тесты
+        run: python -m unittest discover -s tests
+
+      - name: Собрать NetVault.exe и NetMaster.exe
+        run: python build.py
+
+      # Оконная программа не задерживает консоль, поэтому ждём её явно
+      # через Start-Process -Wait и смотрим код возврата.
+      - name: Проверить собранные программы
+        run: |
+          foreach ($app in "NetVault", "NetMaster") {
+            $exe = ".\dist\$app.exe"
+            $run = Start-Process -FilePath $exe -ArgumentList "--selftest" -Wait -PassThru
+            if ($run.ExitCode -ne 0) { throw "$app.exe не прошёл самопроверку" }
+            Write-Host "$app.exe — работает"
+          }
+
+      - name: Приложить программы к запуску
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetVault-NetMaster-windows
+          path: |
+            dist/NetVault.exe
+            dist/NetMaster.exe
+          if-no-files-found: error
+          retention-days: 30

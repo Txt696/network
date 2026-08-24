@@ -18,7 +18,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="NetMaster — управление оборудованием")
     parser.add_argument("--vault", help="путь к хранилищу NetVault")
     parser.add_argument("--device", help="сразу подключиться к устройству с этим id")
+    parser.add_argument("--selftest", action="store_true",
+                        help="проверить сборку и выйти (для собранного .exe)")
     args = parser.parse_args(argv)
+
+    if args.selftest:
+        from netcore import selftest
+        return selftest.run(selftest.SSH)
 
     try:
         import tkinter as tk

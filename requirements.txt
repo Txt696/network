@@ -1,0 +1,7 @@
+# Что нужно приложениям
+cryptography>=42.0      # шифрование хранилища паролей
+paramiko>=3.4           # SSH и SFTP
+argon2-cffi>=23.1       # необязательно: более стойкий KDF вместо scrypt
+
+# Что нужно только для сборки .exe (python build.py)
+pyinstaller>=6.3

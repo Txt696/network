@@ -20,7 +20,13 @@ from netvault import APP_NAME, __version__, appconfig  # noqa: E402
 def main(argv=None):
     parser = argparse.ArgumentParser(description="%s %s" % (APP_NAME, __version__))
     parser.add_argument("--vault", help="путь к хранилищу")
+    parser.add_argument("--selftest", action="store_true",
+                        help="проверить сборку и выйти (для собранного .exe)")
     args = parser.parse_args(argv)
+
+    if args.selftest:
+        from netcore import selftest
+        return selftest.run()
 
     try:
         import tkinter as tk
