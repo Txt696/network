@@ -11,6 +11,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from netcore import launcher
 from netcore.secretstore import LockedError
 from netmaster.core import macros, network_tools
 from netmaster.core.inventory import Inventory
@@ -202,14 +203,19 @@ class MainWindow:
         self._update_status()
 
     def launch_netvault(self):
+        """Открыть NetVault: собранную программу рядом или скрипт из исходников."""
         import subprocess
-        import sys
-        root_dir = Path(__file__).resolve().parents[2]
-        command = [sys.executable, str(root_dir / "netvault" / "main.py")]
+
+        found = launcher.command_for("NetVault", "netvault/main.py")
+        if found is None:
+            messagebox.showerror(APP_TITLE, launcher.not_found_message("NetVault"),
+                                 parent=self.root)
+            return
+        command, work_dir = found
         if self.inventory:
             command += ["--vault", str(self.inventory.vault.path)]
         try:
-            subprocess.Popen(command, cwd=str(root_dir))
+            subprocess.Popen(command, cwd=work_dir)
         except OSError as exc:
             messagebox.showerror(APP_TITLE, "Не удалось запустить NetVault: %s" % exc,
                                  parent=self.root)

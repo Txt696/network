@@ -12,6 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from netcore import Device, KINDS, PROTOCOLS, STATUSES, Vault, VaultError
+from netcore import launcher
 from netcore.models import DEFAULT_PORTS, slugify
 from netcore.secretstore import FIELDS as SECRET_FIELDS, LockedError
 from netvault import APP_NAME, __version__, appconfig
@@ -777,18 +778,19 @@ class MainWindow:
         widget.config(state=tk.DISABLED)
 
     def launch_netmaster(self, device_id=None):
-        root_dir = Path(__file__).resolve().parents[2]
-        script = root_dir / "netmaster" / "main.py"
-        if not script.exists():
-            messagebox.showerror(APP_NAME, "NetMaster не найден: %s" % script, parent=self.root)
+        """Открыть NetMaster: собранную программу рядом или скрипт из исходников."""
+        found = launcher.command_for("NetMaster", "netmaster/main.py")
+        if found is None:
+            messagebox.showerror(APP_NAME, launcher.not_found_message("NetMaster"),
+                                 parent=self.root)
             return
-        command = [sys.executable, str(script)]
+        command, work_dir = found
         if self.vault:
             command += ["--vault", str(self.vault.path)]
         if device_id:
             command += ["--device", device_id]
         try:
-            subprocess.Popen(command, cwd=str(root_dir))
+            subprocess.Popen(command, cwd=work_dir)
             self.status_label.config(text="NetMaster запущен")
         except OSError as exc:
             messagebox.showerror(APP_NAME, "Не удалось запустить NetMaster: %s" % exc,
