@@ -19,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
+VERIFY_TIMEOUT = 120  # сколько ждём ответа от собранной программы на --selftest
 WORK = ROOT / "build"
 
 APPS = {
@@ -31,7 +32,7 @@ def build(key, onefile=True):
     name, entry, icon = APPS[key]
     print("\n=== Собираю %s ===" % name)
     args = [
-        sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--windowed",
+        sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--noupx",
         "--onefile" if onefile else "--onedir",
         "--name", name,
         "--paths", str(ROOT),
@@ -49,8 +50,12 @@ def verify(path):
     if not path.exists():
         print("!! не нашёл %s" % path)
         return False
-    result = subprocess.run([str(path), "--selftest"], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace")
+    try:
+        result = subprocess.run([str(path), "--selftest"], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=VERIFY_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print("%s: не ответила за %d с — проверка прервана" % (path.name, VERIFY_TIMEOUT))
+        return False
     output = (result.stdout or result.stderr).strip()
     if output:
         print(output)

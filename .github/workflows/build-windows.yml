@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     # Консоль Windows по умолчанию cp1252 — русский текст в выводе ронял бы шаги.
     env:
