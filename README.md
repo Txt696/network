@@ -114,6 +114,11 @@ python netmaster/cli.py run --device core-sw-01 "show run" --enable
 python -m unittest discover -s tests
 ```
 
+Запускать из корня репозитория. Если Python отвечает
+`Start directory is not importable: 'tests'` — значит папки `tests` рядом нет:
+команда запущена не из корня либо копия репозитория устарела (`git pull`).
+Ожидаемый вывод: `Ran 10 tests ... OK`.
+
 ## Структура кода
 
 ```
