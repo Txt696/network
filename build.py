@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Сборка NetVault и NetMaster в самостоятельные программы.
+Сборка NetVault, NetMaster и NetMap в самостоятельные программы.
 
-    python build.py            собрать обе, каждая — один файл
+    python build.py            собрать все три, каждая — один файл
     python build.py netmaster  собрать только NetMaster
     python build.py --folder   папкой вместо одного файла (запускается быстрее)
 
-На Windows получатся dist\\NetVault.exe и dist\\NetMaster.exe — их можно
-скопировать на другой компьютер, Python там не нужен. Собирать надо на той
-системе, для которой нужна программа: exe собирается только на Windows.
+На Windows получатся dist\\NetVault.exe, dist\\NetMaster.exe и dist\\NetMap.exe —
+их можно скопировать на другой компьютер, Python там не нужен. Собирать надо
+на той системе, для которой нужна программа: exe собирается только на Windows.
 """
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,12 @@ WORK = ROOT / "build"
 APPS = {
     "netvault": ("NetVault", ROOT / "netvault" / "main.py", ROOT / "packaging" / "netvault.ico"),
     "netmaster": ("NetMaster", ROOT / "netmaster" / "main.py", ROOT / "packaging" / "netmaster.ico"),
+    "netmap": ("NetMap", ROOT / "netweb" / "main.py", ROOT / "packaging" / "netmap.ico"),
+}
+
+# Страница карты — не код, её надо положить внутрь сборки отдельно.
+EXTRA_DATA = {
+    "netmap": [(ROOT / "netweb" / "static" / "map.html", "netweb/static")],
 }
 
 
@@ -40,6 +47,8 @@ def build(key, onefile=True):
     ]
     if icon.exists():
         args += ["--icon", str(icon)]
+    for source, target in EXTRA_DATA.get(key, []):
+        args += ["--add-data", "%s%s%s" % (source, os.pathsep, target)]
     args.append(str(entry))
     subprocess.check_call(args)
     return DIST / (name + (".exe" if sys.platform == "win32" else ""))
@@ -75,7 +84,7 @@ def main(argv=None):
     use_utf8()
     parser = argparse.ArgumentParser(description="Сборка NetVault и NetMaster")
     parser.add_argument("apps", nargs="*", metavar="ПРОГРАММА",
-                        help="netvault и/или netmaster (по умолчанию обе)")
+                        help="netvault, netmaster, netmap (по умолчанию все)")
     parser.add_argument("--folder", action="store_true",
                         help="собрать папкой, а не одним файлом (запуск быстрее)")
     parser.add_argument("--no-check", action="store_true",

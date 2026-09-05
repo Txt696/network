@@ -8,13 +8,13 @@
 import sys
 
 # Что нужно любой из программ. Своё каждая передаёт через extra:
-# NetVault обходится без paramiko — по SSH ходит только NetMaster.
+# окно нужно не всем (NetMap — веб-сервер), по SSH ходит только NetMaster.
 CHECKS = (
-    ("tkinter", "графический интерфейс"),
     ("cryptography", "шифрование хранилища"),
     ("netcore", "ядро NetVault"),
 )
 
+GUI = (("tkinter", "графический интерфейс"),)
 SSH = (("paramiko", "подключение по SSH и SFTP"),)
 
 OPTIONAL = (("argon2", "усиленный KDF (необязателен, иначе scrypt)"),)
