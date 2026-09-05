@@ -327,8 +327,8 @@ class MainWindow:
         self.peer_combo.grid(row=2, column=1, sticky=tk.EW, pady=(6, 0))
         ttk.Label(editor, text="Порт соседа:").grid(row=2, column=2, sticky=tk.W, padx=(16, 6),
                                                     pady=(6, 0))
-        ttk.Entry(editor, textvariable=self.port_peer_port_var, width=28).grid(
-            row=2, column=3, sticky=tk.EW, pady=(6, 0))
+        self.peer_port_entry = ttk.Entry(editor, textvariable=self.port_peer_port_var, width=28)
+        self.peer_port_entry.grid(row=2, column=3, sticky=tk.EW, pady=(6, 0))
 
         buttons = ttk.Frame(editor)
         buttons.grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
@@ -336,8 +336,9 @@ class MainWindow:
                    command=self.apply_port_settings).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Очистить выбранные",
                    command=self.clear_port_settings).pack(side=tk.LEFT, padx=6)
-        ttk.Label(editor, text="Порт соседа записывается, когда выбран ровно один порт; "
-                               "режим, VLAN и сосед — сразу для всех выбранных.",
+        ttk.Label(editor, text="Режим и VLAN применяются сразу ко всем выбранным портам. "
+                               "Аплинк у каждого порта свой, поэтому сосед и его порт "
+                               "меняются, только когда выбран ровно один порт.",
                   foreground="#666", wraplength=560, justify=tk.LEFT).grid(
             row=4, column=0, columnspan=4, sticky=tk.W, pady=(6, 0))
         editor.columnconfigure(1, weight=1)
@@ -836,11 +837,14 @@ class MainWindow:
             self.port_selection_label.config(
                 text="Выбрано %d %s: %s … %s" % (len(selection), ports.plural(len(selection)),
                                                  selection[0], selection[-1]))
+        single = len(selection) == 1
         cfg = self._port_cfg(selection[0], create=False) or {}
         self.port_mode_var.set(cfg.get("mode", ""))
         self.port_vlans_var.set(" ".join(cfg.get("vlans", [])))
-        self.port_peer_var.set(cfg.get("peer", ""))
-        self.port_peer_port_var.set(cfg.get("peer_port", "") if len(selection) == 1 else "")
+        self.port_peer_var.set(cfg.get("peer", "") if single else "")
+        self.port_peer_port_var.set(cfg.get("peer_port", "") if single else "")
+        self.peer_combo.config(state="normal" if single else "disabled")
+        self.peer_port_entry.config(state="normal" if single else "disabled")
 
     def apply_port_settings(self):
         selection = self.ports_tree.selection()
@@ -849,15 +853,17 @@ class MainWindow:
             return
         mode = self.port_mode_var.get().strip()
         vlans = self.port_vlans_var.get().replace(",", " ").split()
-        peer = self.port_peer_var.get().strip()
-        peer_port = self.port_peer_port_var.get().strip() if len(selection) == 1 else ""
+        # Режим и VLAN у пачки портов одинаковые, а аплинк у каждого свой —
+        # поэтому сосед и его порт меняются только при выборе одного порта.
+        single = len(selection) == 1
         for name in selection:
-            if not (mode or vlans or peer):
-                self.port_config.pop(name.lower(), None)
-                continue
             cfg = self._port_cfg(name)
             cfg["mode"], cfg["vlans"] = mode, list(vlans)
-            cfg["peer"], cfg["peer_port"] = peer, peer_port
+            if single:
+                cfg["peer"] = self.port_peer_var.get().strip()
+                cfg["peer_port"] = self.port_peer_port_var.get().strip()
+            if not self._is_set(cfg):
+                self.port_config.pop(name.lower(), None)
         self.refresh_ports_table()
 
     def clear_port_settings(self):
@@ -882,7 +888,7 @@ class MainWindow:
                 cfg = self._port_cfg(local_port)
                 cfg["peer"], cfg["peer_port"] = peer, peer_port
             else:
-                plain.append(peer)
+                plain.append(links.format("", peer, peer_port))
         for entry in device.vlans:
             port, mode, vlans = ports.parse_vlan(entry)
             if port:
