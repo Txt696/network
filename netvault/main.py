@@ -26,7 +26,7 @@ def main(argv=None):
 
     if args.selftest:
         from netcore import selftest
-        return selftest.run()
+        return selftest.run(selftest.GUI)
 
     try:
         import tkinter as tk

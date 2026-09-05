@@ -133,6 +133,7 @@ class MainWindow:
 
         tools_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="Управление", menu=tools_menu)
+        tools_menu.add_command(label="Карта сети в браузере", command=self.launch_netmap)
         tools_menu.add_command(label="Открыть NetMaster с этим хранилищем",
                                command=self.launch_netmaster)
 
@@ -794,6 +795,23 @@ class MainWindow:
             self.status_label.config(text="NetMaster запущен")
         except OSError as exc:
             messagebox.showerror(APP_NAME, "Не удалось запустить NetMaster: %s" % exc,
+                                 parent=self.root)
+
+    def launch_netmap(self):
+        """Открыть карту сети: соседнюю программу NetMap либо её скрипт."""
+        found = launcher.command_for("NetMap", "netweb/main.py")
+        if found is None:
+            messagebox.showerror(APP_NAME, launcher.not_found_message("NetMap"),
+                                 parent=self.root)
+            return
+        command, work_dir = found
+        if self.vault:
+            command += ["--vault", str(self.vault.path)]
+        try:
+            subprocess.Popen(command, cwd=work_dir)
+            self.status_label.config(text="Карта сети открывается в браузере")
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, "Не удалось открыть карту: %s" % exc,
                                  parent=self.root)
 
     def launch_netmaster_for_device(self):

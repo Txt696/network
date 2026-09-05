@@ -20,6 +20,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .links import describe as describe_link, parse as parse_link
 from .models import Device, now_stamp, slugify
 from .secretstore import SecretStore
 
@@ -280,15 +281,34 @@ class Vault:
     # ------------------------------------------------------------ топология
     def topology(self, devices=None):
         """Рёбра графа: (устройство, аплинк, найден_ли_аплинк_в_хранилище)."""
+        return [(link["source"], link["target"], link["found"])
+                for link in self.links(devices)]
+
+    def links(self, devices=None):
+        """Связи с портами — то, что рисует карта сети.
+
+        Каждая связь: откуда, куда, свой порт, порт соседа, подпись
+        и найден ли сосед в хранилище.
+        """
         items = self.devices() if devices is None else list(devices)
         known = {d.id for d in items}
         by_name = {d.name.lower(): d.id for d in items}
-        edges = []
+        result = []
         for device in items:
-            for link in device.uplinks:
-                target = link if link in known else by_name.get(link.lower())
-                edges.append((device.id, target or link, target is not None))
-        return edges
+            for entry in device.uplinks:
+                local_port, peer, peer_port = parse_link(entry)
+                if not peer:
+                    continue
+                target = peer if peer in known else by_name.get(peer.lower())
+                result.append({
+                    "source": device.id,
+                    "target": target or peer,
+                    "found": target is not None,
+                    "local_port": local_port,
+                    "peer_port": peer_port,
+                    "label": describe_link(local_port, peer_port),
+                })
+        return result
 
     def backlinks(self, device_id, devices=None):
         """Кто указывает это устройство своим аплинком."""
@@ -297,7 +317,8 @@ class Vault:
         names = {device_id.lower()}
         if device:
             names.add(device.name.lower())
-        return [d.id for d in items if any(l.lower() in names for l in d.uplinks)]
+        return [d.id for d in items
+                if any(parse_link(l)[1].lower() in names for l in d.uplinks)]
 
     # --------------------------------------------------------------- заметки
     def add_note(self, device_id, title, text, subdir="collected"):

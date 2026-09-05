@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Карта сети</title>
+<style>
+  :root {
+    --bg: #12161c; --panel: #1b212b; --line: #2c3542;
+    --text: #dbe2ea; --dim: #8a97a8; --accent: #569cd6;
+    --ok: #6acd82; --warn: #e9c46a; --bad: #f48771;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 "Segoe UI", Arial, sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .info { color: var(--dim); font-size: 13px; }
+  header input { margin-left: auto; background: #10141a; color: var(--text);
+                 border: 1px solid var(--line); border-radius: 4px;
+                 padding: 6px 10px; width: 260px; }
+  header button { background: #10141a; color: var(--text); cursor: pointer;
+                  border: 1px solid var(--line); border-radius: 4px; padding: 6px 12px; }
+  main { display: flex; height: calc(100vh - 53px); }
+  #map { flex: 1; overflow: auto; }
+  aside { width: 340px; border-left: 1px solid var(--line); background: var(--panel);
+          overflow: auto; padding: 14px 16px; }
+  aside h2 { font-size: 15px; margin: 0 0 10px; }
+  aside table { width: 100%; border-collapse: collapse; }
+  aside td { padding: 3px 0; vertical-align: top; }
+  aside td.key { color: var(--dim); width: 42%; }
+  aside pre { white-space: pre-wrap; word-break: break-word; color: var(--dim);
+              background: #10141a; border: 1px solid var(--line);
+              border-radius: 4px; padding: 8px; }
+  .hint { color: var(--dim); }
+  .site-label { fill: var(--dim); font-size: 13px; font-weight: 600; }
+  .site-box { fill: rgba(255,255,255,0.02); stroke: var(--line); }
+  .node { cursor: pointer; }
+  .node rect { fill: #222b36; stroke: var(--line); rx: 6; }
+  .node:hover rect, .node.selected rect { stroke: var(--accent); }
+  .node .name { fill: var(--text); font-size: 13px; }
+  .node .ip { fill: var(--dim); font-size: 11px; }
+  .link { stroke: var(--ok); stroke-width: 2; fill: none; }
+  .link.missing { stroke: var(--bad); stroke-dasharray: 6 4; }
+  .port { fill: var(--dim); font-size: 10px; }
+  .dim { opacity: 0.15; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Карта сети</h1>
+  <span class="info" id="info"></span>
+  <input id="search" placeholder="Поиск: имя, адрес, регион">
+  <button id="reload">Обновить</button>
+</header>
+<main>
+  <div id="map"></div>
+  <aside id="card"><p class="hint">Выберите устройство на карте.</p></aside>
+</main>
+
+<script>
+const NS = "http://www.w3.org/2000/svg";
+const NODE_W = 190, NODE_H = 46, GAP_Y = 26, GAP_X = 130;
+const PAD = 22, TOP = 54, LEFT = 40;
+let data = null, selected = null;
+
+const el = (tag, attrs = {}, text) => {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+
+async function load() {
+  const response = await fetch("/api/map");
+  data = await response.json();
+  document.getElementById("info").textContent =
+    `${data.total} устройств · ${data.sites.length} регионов · ${data.vault}`;
+  draw();
+}
+
+// Раскладка: колонка на регион, устройства внутри колонки сверху вниз.
+function layout() {
+  const places = new Map();
+  let x = LEFT, height = 0;
+  const columns = data.sites.map(site => {
+    const column = { name: site.name, x, y: TOP, devices: [] };
+    let y = TOP + 34;
+    for (const device of site.devices) {
+      device.site = site.name;
+      places.set(device.id, { x: x + PAD, y, device });
+      column.devices.push({ device, x: x + PAD, y });
+      y += NODE_H + GAP_Y;
+    }
+    column.height = Math.max(y - TOP + 10, 80);
+    height = Math.max(height, column.y + column.height);
+    x += NODE_W + PAD * 2 + GAP_X;
+    return column;
+  });
+  return { columns, places, width: x, height: height + 40 };
+}
+
+function draw() {
+  const { columns, places, width, height } = layout();
+  const svg = el("svg", { width, height, viewBox: `0 0 ${width} ${height}` });
+
+  for (const column of columns) {
+    svg.appendChild(el("rect", { class: "site-box", x: column.x, y: column.y,
+      width: NODE_W + PAD * 2, height: column.height, rx: 10 }));
+    svg.appendChild(el("text", { class: "site-label", x: column.x + PAD,
+      y: column.y + 22 }, column.name));
+  }
+
+  for (const link of data.links) {
+    const from = places.get(link.source), to = places.get(link.target);
+    if (!from) continue;
+    const start = { x: from.x + NODE_W, y: from.y + NODE_H / 2 };
+    const end = to ? { x: to.x, y: to.y + NODE_H / 2 }
+                   : { x: start.x + GAP_X / 2, y: start.y };
+    const middle = (start.x + end.x) / 2;
+    const path = el("path", {
+      class: "link" + (link.found && to ? "" : " missing"),
+      d: `M ${start.x} ${start.y} C ${middle} ${start.y}, ${middle} ${end.y}, ${end.x} ${end.y}`,
+      "data-from": link.source, "data-to": link.target });
+    svg.appendChild(path);
+    if (link.local_port)
+      svg.appendChild(el("text", { class: "port", x: start.x + 6, y: start.y - 6 },
+                         link.local_port));
+    if (link.peer_port && to)
+      svg.appendChild(el("text", { class: "port", x: end.x - 6, y: end.y - 6,
+                                   "text-anchor": "end" }, link.peer_port));
+    if (!to)
+      svg.appendChild(el("text", { class: "port", x: end.x + 6, y: end.y + 4 },
+                         link.target + " — нет в хранилище"));
+  }
+
+  for (const column of columns) {
+    for (const { device, x, y } of column.devices) {
+      const group = el("g", { class: "node", "data-id": device.id,
+        "data-search": [device.name, device.mgmt_ip, device.vendor, device.kind,
+                        device.site].filter(Boolean).join(" ").toLowerCase() });
+      group.appendChild(el("rect", { x, y, width: NODE_W, height: NODE_H }));
+      group.appendChild(el("text", { class: "name", x: x + 12, y: y + 20 }, device.name));
+      group.appendChild(el("text", { class: "ip", x: x + 12, y: y + 36 },
+        [device.mgmt_ip, device.vendor, device.kind].filter(Boolean).join(" · ")));
+      group.addEventListener("click", () => select(device.id));
+      svg.appendChild(group);
+    }
+  }
+
+  const map = document.getElementById("map");
+  map.innerHTML = "";
+  map.appendChild(svg);
+  if (selected) markSelected();
+  filter();
+}
+
+async function select(id) {
+  selected = id;
+  markSelected();
+  const response = await fetch("/api/device/" + encodeURIComponent(id));
+  const card = await response.json();
+  const aside = document.getElementById("card");
+  if (card.error) { aside.innerHTML = `<p class="hint">${card.error}</p>`; return; }
+
+  const rows = [["Регион", card.site], ["Тип", card.kind], ["Адрес", card.mgmt_ip],
+                ["Вендор", card.vendor], ["Модель", card.model],
+                ["Прошивка", card.os_version], ["Стойка", card.rack],
+                ["Роль", card.role], ["Состояние", card.status],
+                ["Ответственный", card.owner], ["Теги", (card.tags || []).join(", ")],
+                ["VLAN", (card.vlans || []).join(", ")]]
+    .filter(([, value]) => value)
+    .map(([key, value]) => `<tr><td class="key">${key}</td><td>${escape(value)}</td></tr>`)
+    .join("");
+
+  const links = (card.links || []).map(link => {
+    const other = link.source === card.id ? link.target : link.source;
+    const ports = link.label ? ` (${escape(link.label)})` : "";
+    return `<li>${escape(other)}${ports}${link.found ? "" : " — нет в хранилище"}</li>`;
+  }).join("");
+
+  aside.innerHTML = `<h2>${escape(card.name)}</h2><table>${rows}</table>` +
+    (links ? `<h2 style="margin-top:14px">Связи</h2><ul>${links}</ul>` : "") +
+    (card.body ? `<h2 style="margin-top:14px">Заметка</h2><pre>${escape(card.body)}</pre>` : "") +
+    (card.notes && card.notes.length
+      ? `<h2 style="margin-top:14px">Файлы</h2><p class="hint">${card.notes.length} шт. в хранилище</p>` : "");
+}
+
+function markSelected() {
+  document.querySelectorAll(".node").forEach(node =>
+    node.classList.toggle("selected", node.dataset.id === selected));
+}
+
+function filter() {
+  const query = document.getElementById("search").value.trim().toLowerCase();
+  document.querySelectorAll(".node").forEach(node => {
+    const text = node.dataset.search || "";
+    node.classList.toggle("dim", Boolean(query) && !text.includes(query));
+  });
+}
+
+function escape(value) {
+  return String(value === undefined || value === null ? "" : value)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+document.getElementById("search").addEventListener("input", filter);
+document.getElementById("reload").addEventListener("click", load);
+load();
+</script>
+</body>
+</html>

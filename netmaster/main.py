@@ -24,7 +24,7 @@ def main(argv=None):
 
     if args.selftest:
         from netcore import selftest
-        return selftest.run(selftest.SSH)
+        return selftest.run(selftest.GUI + selftest.SSH)
 
     try:
         import tkinter as tk
