@@ -12,7 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from netcore import Device, KINDS, PROTOCOLS, STATUSES, Vault, VaultError
-from netcore import launcher
+from netcore import launcher, links, ports
 from netcore.models import DEFAULT_PORTS, slugify
 from netcore.secretstore import FIELDS as SECRET_FIELDS, LockedError
 from netvault import APP_NAME, __version__, appconfig
@@ -39,10 +39,13 @@ FORM_FIELDS = (
     ("owner", "Ответственный", "entry", None),
     ("secret", "Ссылка на доступы", "entry", None),
     ("tags", "Теги (через запятую)", "entry", None),
-    ("uplinks", "Аплинки (через запятую)", "entry", None),
-    ("vlans", "VLAN (через запятую)", "entry", None),
 )
-LIST_FIELDS = ("tags", "uplinks", "vlans")
+LIST_FIELDS = ("tags",)
+
+# Варианты для списка типов портов: "Gi — GigabitEthernet, 1 Гбит".
+PORT_TYPE_CHOICES = ["%s — %s" % (code, text) for code, text in ports.PORT_TYPES]
+PORT_TYPE_CODES = {choice: code for choice, (code, _) in
+                   zip(PORT_TYPE_CHOICES, ports.PORT_TYPES)}
 
 KIND_LABELS = {
     "server": "Серверы", "switch": "Свитчи", "router": "Роутеры",
@@ -65,6 +68,21 @@ class MainWindow:
         self.field_vars = {key: tk.StringVar() for key, _, _, _ in FORM_FIELDS}
         self.secret_vars = {key: tk.StringVar() for key in SECRET_FIELDS}
         self.show_secrets = tk.BooleanVar(value=False)
+
+        # Порты: группы («Gi1/0/1-48») и настройка каждого порта отдельно.
+        self.port_groups = []
+        self.port_config = {}
+        self.port_type_var = tk.StringVar(value=PORT_TYPE_CHOICES[1])
+        self.port_path_var = tk.StringVar(value="1/0")
+        self.port_count_var = tk.StringVar(value="48")
+        self.port_first_var = tk.StringVar(value="1")
+        self.port_mode_var = tk.StringVar()
+        self.port_vlans_var = tk.StringVar()
+        self.port_peer_var = tk.StringVar()
+        self.port_peer_port_var = tk.StringVar()
+        self.device_vlans_var = tk.StringVar()
+        self.plain_uplinks_var = tk.StringVar()
+        self.only_configured = tk.BooleanVar(value=False)
 
         self._setup_style()
         self._build_menu()
@@ -183,6 +201,7 @@ class MainWindow:
         self.notebook = ttk.Notebook(right)
         self.notebook.pack(fill=tk.BOTH, expand=True)
         self.notebook.add(self._build_form_tab(), text="Данные")
+        self.notebook.add(self._build_ports_tab(), text="Порты (аплинки и VLAN)")
         self.notebook.add(self._build_note_tab(), text="Заметка")
         self.notebook.add(self._build_secret_tab(), text="Доступы")
         self.notebook.add(self._build_collected_tab(), text="Собранное")
@@ -193,6 +212,7 @@ class MainWindow:
         ttk.Button(actions, text="Отменить правки", command=self.reload_current).pack(side=tk.LEFT, padx=4)
         ttk.Button(actions, text="Подключиться в NetMaster",
                    command=self.launch_netmaster_for_device).pack(side=tk.RIGHT)
+        self._refresh_port_groups()
 
     def _build_form_tab(self):
         frame = ttk.Frame(self.notebook, padding=8)
@@ -213,11 +233,126 @@ class MainWindow:
             widget.grid(row=row, column=col * 2 + 1, sticky=tk.EW, padx=(0, 12), pady=3)
         for col in range(columns):
             frame.columnconfigure(col * 2 + 1, weight=1)
-        hint = ttk.Label(
-            frame,
-            text="Аплинки — id или названия других устройств; по ним строится топология.",
-            foreground="#666")
-        hint.grid(row=per_column, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        self._build_port_groups(frame).grid(
+            row=per_column, column=0, columnspan=4, sticky=tk.EW, pady=(12, 0))
+        return frame
+
+    def _build_port_groups(self, parent):
+        """Сколько на устройстве портов и как они называются (Gi1/0/1-48)."""
+        box = ttk.LabelFrame(parent, text="Порты устройства", padding=6)
+
+        line = ttk.Frame(box)
+        line.pack(fill=tk.X)
+        ttk.Label(line, text="Тип:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
+        ttk.Combobox(line, textvariable=self.port_type_var, values=PORT_TYPE_CHOICES,
+                     state="readonly", width=24).grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(line, text="Количество:").grid(row=0, column=2, sticky=tk.W, padx=(16, 4))
+        ttk.Spinbox(line, textvariable=self.port_count_var, from_=1, to=ports.MAX_PORTS,
+                    width=5).grid(row=0, column=3, sticky=tk.W)
+        ttk.Button(line, text="Добавить группу", command=self.add_port_group).grid(
+            row=0, column=4, rowspan=2, padx=(16, 0))
+        ttk.Label(line, text="Шасси/модуль:").grid(row=1, column=0, sticky=tk.W, padx=(0, 4),
+                                                   pady=(4, 0))
+        ttk.Entry(line, textvariable=self.port_path_var, width=8).grid(
+            row=1, column=1, sticky=tk.W, pady=(4, 0))
+        ttk.Label(line, text="С номера:").grid(row=1, column=2, sticky=tk.W, padx=(16, 4),
+                                               pady=(4, 0))
+        ttk.Spinbox(line, textvariable=self.port_first_var, from_=0, to=ports.MAX_PORTS,
+                    width=5).grid(row=1, column=3, sticky=tk.W, pady=(4, 0))
+
+        body = ttk.Frame(box)
+        body.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.port_group_list = tk.Listbox(body, height=4, exportselection=False)
+        self.port_group_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        side = ttk.Frame(body)
+        side.pack(side=tk.LEFT, padx=6)
+        ttk.Button(side, text="Удалить", width=12, command=self.remove_port_group).pack()
+        ttk.Button(side, text="Очистить", width=12, command=self.clear_port_groups).pack(pady=4)
+
+        self.port_total_label = ttk.Label(box, text="", foreground="#666")
+        self.port_total_label.pack(anchor=tk.W, pady=(4, 0))
+        ttk.Label(box, text="Свитч на 48 гигабитов и 4 десятки — это две группы: "
+                            "Gi 1/0 × 48 и Te 1/0 × 4 с номера 49. Настройка каждого порта "
+                            "отдельно — на вкладке «Порты (аплинки и VLAN)».",
+                  foreground="#666", wraplength=560, justify=tk.LEFT).pack(anchor=tk.W)
+        return box
+
+    def _build_ports_tab(self):
+        """Таблица портов: у каждого свой аплинк и свои VLAN."""
+        frame = ttk.Frame(self.notebook, padding=6)
+
+        top = ttk.Frame(frame)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Выберите порт (или несколько) и настройте его ниже.",
+                  foreground="#666").pack(side=tk.LEFT)
+        ttk.Checkbutton(top, text="Только настроенные", variable=self.only_configured,
+                        command=self.refresh_ports_table).pack(side=tk.RIGHT)
+
+        table = ttk.Frame(frame)
+        table.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.ports_tree = ttk.Treeview(table, columns=("mode", "vlans", "peer", "peer_port"),
+                                       show="tree headings", height=12, selectmode="extended")
+        self.ports_tree.heading("#0", text="Порт")
+        self.ports_tree.heading("mode", text="Режим")
+        self.ports_tree.heading("vlans", text="VLAN")
+        self.ports_tree.heading("peer", text="Аплинк — сосед")
+        self.ports_tree.heading("peer_port", text="Порт соседа")
+        self.ports_tree.column("#0", width=120, stretch=False)
+        self.ports_tree.column("mode", width=70, stretch=False)
+        self.ports_tree.column("vlans", width=130, stretch=False)
+        self.ports_tree.column("peer", width=180, stretch=True)
+        self.ports_tree.column("peer_port", width=110, stretch=False)
+        self.ports_tree.tag_configure("set", background="#eef7ee")
+        self.ports_tree.tag_configure("extra", background="#fff4e2")
+        ports_scroll = ttk.Scrollbar(table, orient=tk.VERTICAL, command=self.ports_tree.yview)
+        self.ports_tree.configure(yscrollcommand=ports_scroll.set)
+        self.ports_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ports_scroll.pack(side=tk.LEFT, fill=tk.Y)
+        self.ports_tree.bind("<<TreeviewSelect>>", self.on_port_select)
+
+        editor = ttk.LabelFrame(frame, text="Настройка порта", padding=6)
+        editor.pack(fill=tk.X, pady=(8, 0))
+        self.port_selection_label = ttk.Label(editor, text="Порт не выбран", foreground="#666")
+        self.port_selection_label.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 6))
+
+        ttk.Label(editor, text="Режим:").grid(row=1, column=0, sticky=tk.W, padx=(0, 6))
+        ttk.Combobox(editor, textvariable=self.port_mode_var, state="readonly", width=12,
+                     values=("",) + ports.VLAN_MODES).grid(row=1, column=1, sticky=tk.W)
+        ttk.Label(editor, text="VLAN (через пробел):").grid(row=1, column=2, sticky=tk.W, padx=(16, 6))
+        ttk.Entry(editor, textvariable=self.port_vlans_var, width=28).grid(
+            row=1, column=3, sticky=tk.EW)
+
+        ttk.Label(editor, text="Сосед:").grid(row=2, column=0, sticky=tk.W, padx=(0, 6), pady=(6, 0))
+        self.peer_combo = ttk.Combobox(editor, textvariable=self.port_peer_var, width=12)
+        self.peer_combo.grid(row=2, column=1, sticky=tk.EW, pady=(6, 0))
+        ttk.Label(editor, text="Порт соседа:").grid(row=2, column=2, sticky=tk.W, padx=(16, 6),
+                                                    pady=(6, 0))
+        ttk.Entry(editor, textvariable=self.port_peer_port_var, width=28).grid(
+            row=2, column=3, sticky=tk.EW, pady=(6, 0))
+
+        buttons = ttk.Frame(editor)
+        buttons.grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+        ttk.Button(buttons, text="Применить к выбранным",
+                   command=self.apply_port_settings).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Очистить выбранные",
+                   command=self.clear_port_settings).pack(side=tk.LEFT, padx=6)
+        ttk.Label(editor, text="Порт соседа записывается, когда выбран ровно один порт; "
+                               "режим, VLAN и сосед — сразу для всех выбранных.",
+                  foreground="#666", wraplength=560, justify=tk.LEFT).grid(
+            row=4, column=0, columnspan=4, sticky=tk.W, pady=(6, 0))
+        editor.columnconfigure(1, weight=1)
+        editor.columnconfigure(3, weight=1)
+
+        rest = ttk.Frame(frame)
+        rest.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(rest, text="VLAN всего устройства (через запятую):").grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 6))
+        ttk.Entry(rest, textvariable=self.device_vlans_var).grid(row=0, column=1, sticky=tk.EW)
+        ttk.Label(rest, text="Аплинки без указания порта (через запятую):").grid(
+            row=1, column=0, sticky=tk.W, padx=(0, 6), pady=(4, 0))
+        ttk.Entry(rest, textvariable=self.plain_uplinks_var).grid(row=1, column=1, sticky=tk.EW,
+                                                                  pady=(4, 0))
+        rest.columnconfigure(1, weight=1)
         return frame
 
     def _build_note_tab(self):
@@ -364,6 +499,8 @@ class MainWindow:
         selected = self.current_id if keep_selection else None
         self.tree.delete(*self.tree.get_children())
         self.devices = self.vault.search(self.search_var.get())
+        if not self.search_var.get().strip():
+            self._refresh_peer_values()
         mode = self.group_var.get()
 
         self._suppress_select = True
@@ -425,6 +562,7 @@ class MainWindow:
         for key, var in self.field_vars.items():
             value = meta.get(key, "")
             var.set(", ".join(value) if isinstance(value, list) else str(value))
+        self._load_ports(device)
         self.note_text.delete("1.0", tk.END)
         self.note_text.insert("1.0", device.body)
         self.note_text.edit_reset()
@@ -442,6 +580,12 @@ class MainWindow:
             var.set("")
         for var in self.secret_vars.values():
             var.set("")
+        self.port_groups = []
+        self.port_config = {}
+        self.device_vlans_var.set("")
+        self.plain_uplinks_var.set("")
+        self._reset_port_editor()
+        self._refresh_port_groups()
         self.note_text.delete("1.0", tk.END)
         self.title_label.config(text="Выберите устройство")
         self.collected_list.delete(0, tk.END)
@@ -451,6 +595,7 @@ class MainWindow:
         values = {key: var.get().strip() for key, var in self.field_vars.items()}
         for key in LIST_FIELDS:
             values[key] = [v.strip() for v in values[key].split(",") if v.strip()]
+        values.update(self._collect_ports())
         values["port"] = values["port"] or DEFAULT_PORTS.get(values.get("protocol", "ssh"), 22)
         try:
             values["port"] = int(values["port"])
@@ -475,6 +620,8 @@ class MainWindow:
         current_meta = dict(current.to_meta())
         for meta in (stored_meta, current_meta):
             meta.pop("updated", None)
+            for key in ("uplinks", "vlans"):
+                meta[key] = sorted(meta.get(key) or [])
         return stored_meta != current_meta or stored.body.rstrip() != current.body.rstrip()
 
     def _confirm_discard(self):
@@ -596,6 +743,183 @@ class MainWindow:
         current_port = self.field_vars["port"].get().strip()
         if not current_port or current_port in [str(p) for p in DEFAULT_PORTS.values()]:
             self.field_vars["port"].set(str(DEFAULT_PORTS.get(protocol, 22)))
+
+    # ----------------------------------------------------------------- порты
+    def add_port_group(self):
+        """Добавить группу портов по заданным типу, шасси и количеству."""
+        try:
+            count = int(self.port_count_var.get())
+            first = int(self.port_first_var.get())
+        except ValueError:
+            messagebox.showwarning(APP_NAME, "Количество и номер — числа", parent=self.root)
+            return
+        if count < 1 or first < 0:
+            messagebox.showwarning(APP_NAME, "Количество — от 1, номер — от 0", parent=self.root)
+            return
+        code = PORT_TYPE_CODES.get(self.port_type_var.get(), self.port_type_var.get())
+        spec = ports.make_group(code, self.port_path_var.get(), first, count)
+        if len(self._port_order()) + count > ports.MAX_PORTS:
+            messagebox.showwarning(
+                APP_NAME, "Больше %d портов на устройство не бывает" % ports.MAX_PORTS,
+                parent=self.root)
+            return
+        if spec not in self.port_groups:
+            self.port_groups.append(spec)
+        self._refresh_port_groups()
+
+    def remove_port_group(self):
+        for index in reversed(self.port_group_list.curselection()):
+            del self.port_groups[index]
+        self._refresh_port_groups()
+
+    def clear_port_groups(self):
+        self.port_groups = []
+        self._refresh_port_groups()
+
+    def _refresh_port_groups(self):
+        self.port_group_list.delete(0, tk.END)
+        for spec in self.port_groups:
+            self.port_group_list.insert(tk.END, ports.describe_group(spec))
+        total = len(self._port_order())
+        self.port_total_label.config(text="Всего: %d %s" % (total, ports.plural(total)))
+        self.refresh_ports_table()
+
+    def _port_order(self):
+        """Все порты по порядку: сначала из групп, затем настроенные вручную."""
+        names = ports.expand(self.port_groups)
+        known = {name.lower() for name in names}
+        names.extend(cfg["name"] for key, cfg in self.port_config.items() if key not in known)
+        return names
+
+    def _port_cfg(self, name, create=True):
+        cfg = self.port_config.get(name.lower())
+        if cfg is None and create:
+            cfg = {"name": name, "mode": "", "vlans": [], "peer": "", "peer_port": ""}
+            self.port_config[name.lower()] = cfg
+        return cfg
+
+    @staticmethod
+    def _is_set(cfg):
+        return bool(cfg and (cfg["mode"] or cfg["vlans"] or cfg["peer"]))
+
+    def refresh_ports_table(self):
+        selected = set(self.ports_tree.selection())
+        self.ports_tree.delete(*self.ports_tree.get_children())
+        from_groups = {name.lower() for name in ports.expand(self.port_groups)}
+        for name in self._port_order():
+            cfg = self._port_cfg(name, create=False)
+            if self.only_configured.get() and not self._is_set(cfg):
+                continue
+            tags = []
+            if self._is_set(cfg):
+                tags.append("set")
+            if name.lower() not in from_groups:
+                tags.append("extra")
+            self.ports_tree.insert(
+                "", tk.END, iid=name, text=name, tags=tags,
+                values=(cfg["mode"] if cfg else "",
+                        " ".join(cfg["vlans"]) if cfg else "",
+                        cfg["peer"] if cfg else "",
+                        cfg["peer_port"] if cfg else ""))
+        keep = [name for name in selected if self.ports_tree.exists(name)]
+        if keep:
+            self.ports_tree.selection_set(*keep)
+
+    def on_port_select(self, _event=None):
+        selection = self.ports_tree.selection()
+        if not selection:
+            self.port_selection_label.config(text="Порт не выбран")
+            return
+        if len(selection) == 1:
+            self.port_selection_label.config(text="Порт %s" % selection[0])
+        else:
+            self.port_selection_label.config(
+                text="Выбрано %d %s: %s … %s" % (len(selection), ports.plural(len(selection)),
+                                                 selection[0], selection[-1]))
+        cfg = self._port_cfg(selection[0], create=False) or {}
+        self.port_mode_var.set(cfg.get("mode", ""))
+        self.port_vlans_var.set(" ".join(cfg.get("vlans", [])))
+        self.port_peer_var.set(cfg.get("peer", ""))
+        self.port_peer_port_var.set(cfg.get("peer_port", "") if len(selection) == 1 else "")
+
+    def apply_port_settings(self):
+        selection = self.ports_tree.selection()
+        if not selection:
+            messagebox.showinfo(APP_NAME, "Сначала выберите порт в таблице", parent=self.root)
+            return
+        mode = self.port_mode_var.get().strip()
+        vlans = self.port_vlans_var.get().replace(",", " ").split()
+        peer = self.port_peer_var.get().strip()
+        peer_port = self.port_peer_port_var.get().strip() if len(selection) == 1 else ""
+        for name in selection:
+            if not (mode or vlans or peer):
+                self.port_config.pop(name.lower(), None)
+                continue
+            cfg = self._port_cfg(name)
+            cfg["mode"], cfg["vlans"] = mode, list(vlans)
+            cfg["peer"], cfg["peer_port"] = peer, peer_port
+        self.refresh_ports_table()
+
+    def clear_port_settings(self):
+        for name in self.ports_tree.selection():
+            self.port_config.pop(name.lower(), None)
+        self.port_mode_var.set("")
+        self.port_vlans_var.set("")
+        self.port_peer_var.set("")
+        self.port_peer_port_var.set("")
+        self.refresh_ports_table()
+
+    def _load_ports(self, device):
+        """Разложить поля ports/uplinks/vlans заметки по портам."""
+        self.port_groups = list(device.ports)
+        self.port_config = {}
+        plain, device_vlans = [], []
+        for entry in device.uplinks:
+            local_port, peer, peer_port = links.parse(entry)
+            if not peer:
+                continue
+            if local_port:
+                cfg = self._port_cfg(local_port)
+                cfg["peer"], cfg["peer_port"] = peer, peer_port
+            else:
+                plain.append(peer)
+        for entry in device.vlans:
+            port, mode, vlans = ports.parse_vlan(entry)
+            if port:
+                cfg = self._port_cfg(port)
+                cfg["mode"], cfg["vlans"] = mode, vlans
+            else:
+                device_vlans.extend(vlans)
+        self.plain_uplinks_var.set(", ".join(plain))
+        self.device_vlans_var.set(", ".join(device_vlans))
+        self._reset_port_editor()
+        self._refresh_port_groups()
+
+    def _reset_port_editor(self):
+        self.port_mode_var.set("")
+        self.port_vlans_var.set("")
+        self.port_peer_var.set("")
+        self.port_peer_port_var.set("")
+        self.port_selection_label.config(text="Порт не выбран")
+
+    def _collect_ports(self):
+        """Собрать из настроек портов поля ports, uplinks и vlans."""
+        uplinks, vlans = [], []
+        vlans.extend(v.strip() for v in self.device_vlans_var.get().split(",") if v.strip())
+        for name in self._port_order():
+            cfg = self._port_cfg(name, create=False)
+            if not cfg:
+                continue
+            if cfg["peer"]:
+                uplinks.append(links.format(name, cfg["peer"], cfg["peer_port"]))
+            entry = ports.format_vlan(name, cfg["mode"], cfg["vlans"])
+            if entry:
+                vlans.append(entry)
+        uplinks.extend(p.strip() for p in self.plain_uplinks_var.get().split(",") if p.strip())
+        return {"ports": list(self.port_groups), "uplinks": uplinks, "vlans": vlans}
+
+    def _refresh_peer_values(self):
+        self.peer_combo["values"] = sorted(device.id for device in self.devices)
 
     # --------------------------------------------------------------- доступы
     def load_secret(self, device):

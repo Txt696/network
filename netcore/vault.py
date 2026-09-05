@@ -66,6 +66,7 @@ port: 22
 secret: ""
 status: active
 tags: []
+ports: []
 uplinks: []
 vlans: []
 ---
