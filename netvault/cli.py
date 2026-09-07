@@ -120,7 +120,8 @@ def cmd_add(args):
         name=args.name, kind=args.kind, mgmt_ip=args.ip or "", hostname=args.hostname or "",
         vendor=args.vendor or "", model=args.model or "", site=args.site or "",
         rack=args.rack or "", role=args.role or "", protocol=args.protocol,
-        port=args.port, tags=args.tags or "", uplinks=args.uplinks or "",
+        port=args.port, tags=args.tags or "", ports=args.ports or "",
+        uplinks=args.uplinks or "",
         body=args.note or "",
     )
     device.id = vault.unique_id(args.name)
@@ -286,6 +287,7 @@ def build_parser():
     p_add.add_argument("--protocol", default="ssh")
     p_add.add_argument("--port", type=int, default=0)
     p_add.add_argument("--tags", help="через запятую")
+    p_add.add_argument("--ports", help="группы портов через запятую, например Gi1/0/1-48")
     p_add.add_argument("--uplinks", help="через запятую")
     p_add.add_argument("--note", help="текст заметки")
     p_add.add_argument("--with-secret", action="store_true", help="сразу спросить логин и пароль")

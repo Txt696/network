@@ -86,6 +86,31 @@ class VaultLinksTest(unittest.TestCase):
     def test_backlinks_understand_ports(self):
         self.assertEqual(self.vault.backlinks("balkan-sw-01"), ["ashgabat-sw-01"])
 
+    def test_link_declared_on_both_sides_counts_once(self):
+        # После автосинхронизации аплинков (Vault._sync_uplinks) обе стороны
+        # физической связи знают о ней — на карте это одна связь, а не две.
+        balkan = self.vault.get("balkan-sw-01")
+        balkan.uplinks = ["Gi1/0/1 -> ashgabat-sw-01:Gi1/0/48"]
+        self.vault.save(balkan)
+        matches = [l for l in self.vault.links()
+                  if {l["source"], l["target"]} == {"ashgabat-sw-01", "balkan-sw-01"}]
+        self.assertEqual(len(matches), 1, matches)
+
+    def test_two_different_links_from_one_device_both_kept(self):
+        # А вот две РАЗНЫЕ связи одного устройства дублем не считаются —
+        # снятие дублей не должно схлопывать линки к разным соседям.
+        third = Device(name="dushak-sw-01", kind="switch", site="Ашхабад",
+                       mgmt_ip="10.1.0.3",
+                       uplinks=["Gi1/0/2 -> ashgabat-sw-01:Gi1/0/47"])
+        self.vault.save(third)
+        touching_ashgabat = {
+            frozenset((l["source"], l["target"])) for l in self.vault.links()
+            if "ashgabat-sw-01" in (l["source"], l["target"])}
+        self.assertEqual(touching_ashgabat, {
+            frozenset({"ashgabat-sw-01", "balkan-sw-01"}),
+            frozenset({"ashgabat-sw-01", "dushak-sw-01"}),
+        })
+
 
 class ServerTest(unittest.TestCase):
     """Сервер поднимается по-настоящему и отвечает по HTTP."""

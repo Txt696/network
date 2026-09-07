@@ -5,7 +5,7 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 
-from . import frontmatter
+from . import frontmatter, links, ports
 
 KINDS = ("server", "switch", "router", "firewall", "ap", "storage", "pdu", "other")
 PROTOCOLS = ("ssh", "telnet", "serial", "https", "rdp", "vnc", "none")
@@ -17,7 +17,7 @@ DEFAULT_PORTS = {"ssh": 22, "telnet": 23, "https": 443, "rdp": 3389, "vnc": 5900
 FIELD_ORDER = (
     "name", "kind", "mgmt_ip", "hostname", "vendor", "model", "os_version",
     "serial", "site", "room", "rack", "unit", "role", "protocol", "port",
-    "secret", "status", "owner", "tags", "uplinks", "vlans", "created", "updated",
+    "secret", "status", "owner", "tags", "ports", "uplinks", "vlans", "created", "updated",
 )
 
 _TRANSLIT = {
@@ -82,6 +82,7 @@ class Device:
         self.status = fields.get("status") or "active"
         self.owner = fields.get("owner", "")
         self.tags = _as_list(fields.get("tags"))
+        self.ports = _as_list(fields.get("ports"))
         self.uplinks = _as_list(fields.get("uplinks"))
         self.vlans = _as_list(fields.get("vlans"))
         self.created = fields.get("created") or now_stamp()
@@ -107,6 +108,21 @@ class Device:
     def label(self):
         return "%s (%s)" % (self.name, self.target) if self.target else self.name
 
+    def port_names(self):
+        """Имена всех портов: `ports: [Gi1/0/1-48]` -> Gi1/0/1 … Gi1/0/48."""
+        return ports.expand(self.ports)
+
+    def configured_ports(self):
+        """Порты, у которых что-то настроено — аплинк или VLAN."""
+        names = [links.parse(entry)[0] for entry in self.uplinks]
+        names += [ports.parse_vlan(entry)[0] for entry in self.vlans]
+        seen, result = set(), []
+        for name in names:
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                result.append(name)
+        return result
+
     # ---------------------------------------------------------- валидация
     def validate(self):
         """Список проблем; пустой — значит всё в порядке."""
@@ -125,6 +141,12 @@ class Device:
             problems.append("неизвестный статус: %s" % self.status)
         if not self.target:
             problems.append("нет ни IP, ни hostname — подключиться будет нельзя")
+        if self.ports:
+            known = {name.lower() for name in self.port_names()}
+            unknown = [p for p in self.configured_ports() if p.lower() not in known]
+            if unknown:
+                problems.append("настроены порты, которых нет в списке портов: %s"
+                                % ", ".join(unknown))
         return problems
 
     # -------------------------------------------------------- сериализация
@@ -136,7 +158,7 @@ class Device:
             "room": self.room, "rack": self.rack, "unit": self.unit, "role": self.role,
             "protocol": self.protocol, "port": self.port, "secret": self.secret,
             "status": self.status, "owner": self.owner, "tags": self.tags,
-            "uplinks": self.uplinks, "vlans": self.vlans,
+            "ports": self.ports, "uplinks": self.uplinks, "vlans": self.vlans,
             "created": self.created, "updated": self.updated,
         }
         meta.update(self.extra)
@@ -152,7 +174,7 @@ class Device:
 
     def searchable_text(self):
         values = [str(v) for v in self.to_meta().values() if not isinstance(v, (list, dict))]
-        values.extend(self.tags + self.uplinks + self.vlans)
+        values.extend(self.tags + self.ports + self.uplinks + self.vlans)
         values.append(self.body)
         values.append(self.id)
         return "\n".join(values).lower()
