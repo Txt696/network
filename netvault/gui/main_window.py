@@ -12,7 +12,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from netcore import Device, KINDS, PROTOCOLS, STATUSES, Vault, VaultError
-from netcore import launcher, links, ports
+from netcore import importer, launcher, links, ports
 from netcore.models import DEFAULT_PORTS, slugify
 from netcore.secretstore import FIELDS as SECRET_FIELDS, LockedError
 from netvault import APP_NAME, __version__, appconfig
@@ -133,6 +133,7 @@ class MainWindow:
         device_menu.add_command(label="Дублировать", command=self.duplicate_device)
         device_menu.add_command(label="Удалить", command=self.delete_device)
         device_menu.add_separator()
+        device_menu.add_command(label="Импортировать конфиг…", command=self.import_config)
         device_menu.add_command(label="Открыть заметку в системе", command=self.open_note_externally)
 
         view_menu = tk.Menu(menubar, tearoff=0)
@@ -191,6 +192,8 @@ class MainWindow:
         buttons.pack(fill=tk.X, pady=4)
         ttk.Button(buttons, text="+ Устройство", command=self.new_device).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Удалить", command=self.delete_device).pack(side=tk.LEFT, padx=4)
+        ttk.Button(left, text="Импорт конфига…",
+                  command=self.import_config).pack(fill=tk.X, pady=(0, 4))
 
         right = ttk.Frame(paned)
         paned.add(right, weight=3)
@@ -559,6 +562,18 @@ class MainWindow:
         if not device:
             return
         self.current_id = device_id
+        self._populate_form_from_device(device)
+        self.title_label.config(text="%s — %s" % (device.name, device.target or "без адреса"))
+        self.load_secret(device)
+        self.refresh_collected()
+        self._update_status()
+
+    def _populate_form_from_device(self, device):
+        """Заполнить форму карточки данными Device — без чтения из хранилища.
+
+        Общий кусок для load_device() (читает с диска) и import_config()
+        (собирает Device на лету из разобранного конфига).
+        """
         meta = device.to_meta()
         for key, var in self.field_vars.items():
             value = meta.get(key, "")
@@ -567,10 +582,6 @@ class MainWindow:
         self.note_text.delete("1.0", tk.END)
         self.note_text.insert("1.0", device.body)
         self.note_text.edit_reset()
-        self.title_label.config(text="%s — %s" % (device.name, device.target or "без адреса"))
-        self.load_secret(device)
-        self.refresh_collected()
-        self._update_status()
 
     def reload_current(self):
         if self.current_id:
@@ -685,6 +696,100 @@ class MainWindow:
         self.title_label.config(text="Новое устройство")
         self.notebook.select(0)
         self.tree.selection_remove(self.tree.selection())
+
+    def import_config(self):
+        """Разобрать running-config и подставить порты/VLAN/аплинки в карточку.
+
+        Само устройство ещё не сохраняется — форма только заполняется,
+        решение сохранять или нет (и что поправить руками) за пользователем.
+        """
+        if not self.vault:
+            messagebox.showinfo(APP_NAME, "Сначала откройте или создайте хранилище",
+                                parent=self.root)
+            return
+        if not self._confirm_discard():
+            return
+        path = filedialog.askopenfilename(
+            title="Импорт конфигурации устройства",
+            filetypes=[("Конфигурация", "*.txt *.cfg *.conf *.log"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            messagebox.showerror(APP_NAME, "Не удалось прочитать файл: %s" % exc, parent=self.root)
+            return
+
+        catalog = self.vault.devices()
+        parsed, hints = importer.parse_config(text, catalog=catalog)
+        if not parsed.name:
+            messagebox.showwarning(
+                APP_NAME, "В файле не нашлась команда hostname — не похоже на конфиг "
+                          "Cisco, или устройство названо иначе.", parent=self.root)
+
+        existing = None
+        if parsed.name:
+            lowered = parsed.name.strip().lower()
+            existing = next((d for d in catalog
+                            if d.name.lower() == lowered or d.id.lower() == slugify(parsed.name)),
+                           None)
+
+        if existing:
+            answer = messagebox.askyesnocancel(
+                APP_NAME,
+                "Устройство «%s» уже есть в хранилище (%s).\n\n"
+                "Обновить его портами, VLAN, IP и аплинками из этого конфига?\n"
+                "«Нет» — завести отдельной новой записью, «Отмена» — не импортировать."
+                % (existing.name, existing.id),
+                parent=self.root)
+            if answer is None:
+                return
+            if answer:
+                parsed = self._merge_into_existing(existing, parsed)
+                self.current_id = existing.id
+            else:
+                self.current_id = None
+        else:
+            self.current_id = None
+
+        if not self.current_id:
+            self.tree.selection_remove(self.tree.selection())
+        self._populate_form_from_device(parsed)
+        self.title_label.config(text="%s%s" % (parsed.name or "Импорт конфига",
+                                               " (обновление)" if self.current_id else " (новое)"))
+        self.notebook.select(0)
+        self.status_label.config(
+            text="Импортировано: %d порт(ов), %d VLAN-настроек, %d аплинк(ов)."
+            % (len(parsed.ports), len(parsed.vlans), len(parsed.uplinks)))
+        if hints:
+            self._show_text_window(
+                "Импорт конфигурации — на что обратить внимание",
+                "\n\n".join(hints))
+
+    @staticmethod
+    def _merge_into_existing(existing, parsed):
+        """Наложить разобранный конфиг на уже существующую карточку.
+
+        Сеть (порты/VLAN/IP/вендор/аплинки) берём из конфига — он свежее.
+        Всё остальное (теги, площадку, стойку, ссылку на доступы, статус)
+        трогать незачем, это ручные данные, конфиг о них ничего не знает.
+        """
+        fields = existing.to_meta()
+        fields.update({
+            "name": parsed.name or existing.name,
+            "kind": parsed.kind,
+            "mgmt_ip": parsed.mgmt_ip or existing.mgmt_ip,
+            "vendor": parsed.vendor or existing.vendor,
+            "protocol": parsed.protocol or existing.protocol,
+            "ports": parsed.ports,
+            "uplinks": parsed.uplinks,
+            "vlans": parsed.vlans,
+            "created": existing.created,
+        })
+        body = existing.body
+        if parsed.body.strip() and parsed.body.strip() not in body:
+            body = (body.rstrip() + "\n\n" + parsed.body).strip()
+        return Device(device_id=existing.id, body=body, **fields)
 
     def duplicate_device(self):
         if not self.current_id:

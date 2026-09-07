@@ -288,10 +288,20 @@ class Vault:
 
     def _reflect_link(self, peer, peer_port, device_id, device_port, visited):
         """Завести у соседа обратную запись — свой порт указал, что подключён сюда."""
-        existing = self._uplink_pairs(peer).get(peer_port.lower())
-        if existing is not None:
-            # Порт соседа уже занят — своим же линком (нечего делать) либо
-            # чужим (трогать не будем, это не наши данные).
+        for index, entry in enumerate(peer.uplinks):
+            local_port, target, target_port = parse_link(entry)
+            if local_port.lower() != peer_port.lower():
+                continue
+            if target_port:
+                # Порт соседа уже занят — своим же линком (нечего делать)
+                # либо чужим (трогать не будем, это не наши данные).
+                return
+            if target.lower() != device_id.lower():
+                return  # порт соседа занят линком на кого-то ещё, пусть и без порта
+            # Был линк на это же устройство без указания порта (например,
+            # после импорта конфига) — теперь порт известен, уточняем запись.
+            peer.uplinks[index] = format_link(peer_port, device_id, device_port)
+            self.save(peer, _visited=visited)
             return
         peer.uplinks.append(format_link(peer_port, device_id, device_port))
         self.save(peer, _visited=visited)

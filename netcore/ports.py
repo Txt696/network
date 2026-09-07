@@ -94,6 +94,40 @@ def expand_group(spec):
     return ["%s%s%d" % (prefix, path, n) for n in range(first, last + 1)]
 
 
+def compress(names):
+    """Обратное к `expand`: свернуть список одиночных портов в группы.
+
+    `['Gi0/1', 'Gi0/2', 'Gi0/3', 'Gi0/5']` -> `['Gi0/1-3', 'Gi0/5']`.
+    Имена уже должны быть в коротком виде (Gi/Te/…, см. PORT_TYPES) —
+    полные названия вендора разворачивает вызывающий код (см. importer.py).
+    Порядок групп — по первому появлению порта этого типа/шасси во входном списке.
+    """
+    buckets, order = {}, []
+    for name in names or []:
+        parsed = parse_group(name)
+        if not parsed:
+            continue
+        prefix, path, first, _last = parsed
+        key = (prefix, path)
+        if key not in buckets:
+            buckets[key] = set()
+            order.append(key)
+        buckets[key].add(first)
+
+    groups = []
+    for prefix, path in order:
+        numbers = sorted(buckets[(prefix, path)])
+        start = prev = numbers[0]
+        for current in numbers[1:] + [None]:
+            if current == prev + 1:
+                prev = current
+                continue
+            groups.append(make_group(prefix, path, start, prev - start + 1))
+            if current is not None:
+                start = prev = current
+    return groups
+
+
 def expand(specs):
     """Все порты устройства по списку групп: по порядку, без повторов."""
     names, seen = [], set()
