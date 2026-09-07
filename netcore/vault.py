@@ -391,17 +391,31 @@ class Vault:
 
         Каждая связь: откуда, куда, свой порт, порт соседа, подпись
         и найден ли сосед в хранилище.
+
+        Полностью описанная с обеих сторон связь (у обоих устройств — свой
+        порт и порт соседа, обычно так и есть после автосинхронизации
+        аплинков, см. _sync_uplinks) — это одна физическая связь, а не две:
+        в списке она встретится один раз, а не по разу с каждой стороны.
         """
         items = self.devices() if devices is None else list(devices)
         known = {d.id for d in items}
         by_name = {d.name.lower(): d.id for d in items}
         result = []
+        seen_pairs = set()
         for device in items:
             for entry in device.uplinks:
                 local_port, peer, peer_port = parse_link(entry)
                 if not peer:
                     continue
                 target = peer if peer in known else by_name.get(peer.lower())
+                if target and local_port and peer_port:
+                    pair_key = frozenset((
+                        (device.id.lower(), local_port.lower()),
+                        (target.lower(), peer_port.lower()),
+                    ))
+                    if pair_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_key)
                 result.append({
                     "source": device.id,
                     "target": target or peer,
