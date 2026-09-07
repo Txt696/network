@@ -20,7 +20,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .links import describe as describe_link, parse as parse_link
+from .links import describe as describe_link, format as format_link, parse as parse_link
 from .models import Device, now_stamp, slugify
 from .secretstore import SecretStore
 
@@ -188,14 +188,21 @@ class Vault:
             return None
         return Device.from_markdown(path.read_text(encoding="utf-8"), device_id=device_id)
 
-    def save(self, device, rename_from=None):
-        """Записать устройство на диск. Возвращает путь к файлу."""
+    def save(self, device, rename_from=None, _visited=None):
+        """Записать устройство на диск. Возвращает путь к файлу.
+
+        Заодно синхронизирует аплинки с соседями: если в этом устройстве
+        порт связан с портом соседа, у соседа заводится (или снимается)
+        обратная запись — настраивать линк на обеих сторонах не нужно.
+        См. `_sync_uplinks`.
+        """
         self.require_vault()
         if not device.id:
             device.id = slugify(device.name)
         device.updated = now_stamp()
         target = self.device_path(device.id)
         renaming = bool(rename_from) and rename_from != device.id
+        previous = self.get(rename_from if renaming else device.id)
         if renaming:
             old = self.device_path(rename_from)
             if target.exists():
@@ -214,7 +221,91 @@ class Vault:
         if renaming and old.exists():
             old.unlink()
         self.log(device.id, "saved", {"name": device.name, "ip": device.mgmt_ip})
+        self._sync_uplinks(device, previous, _visited)
         return target
+
+    # ------------------------------------------------------- синхронизация
+    @staticmethod
+    def _uplink_pairs(device):
+        """Аплинки устройства, у которых известны оба порта — свой и соседа.
+
+        Только такие записи можно отразить у соседа: без порта соседа
+        непонятно, какую строку у него заводить. Ключ словаря — порт в
+        нижнем регистре (для сравнений), значение хранит порт как есть.
+        """
+        pairs = {}
+        for entry in device.uplinks:
+            local_port, peer, peer_port = parse_link(entry)
+            if local_port and peer and peer_port:
+                pairs[local_port.lower()] = (local_port, peer, peer_port)
+        return pairs
+
+    def _sync_uplinks(self, device, previous, _visited):
+        """Провести изменения аплинков device по соседям, которых они касаются.
+
+        Устройство и порт, с которых начался этот save(), помечаются как
+        посещённые (`_visited`) — так обратное отражение не зацикливается,
+        даже если у соседей уже настроены встречные линки друг на друга.
+        """
+        old_pairs = self._uplink_pairs(previous) if previous else {}
+        new_pairs = self._uplink_pairs(device)
+        if not old_pairs and not new_pairs:
+            return
+        visited = set(_visited or ())
+        visited.add(device.id.lower())
+        catalog = {d.id.lower(): d for d in self.devices()}
+
+        def resolve(peer_name):
+            key = (peer_name or "").strip().lower()
+            if key in catalog:
+                return catalog[key]
+            for candidate in catalog.values():
+                if candidate.name.lower() == key:
+                    return candidate
+            return None
+
+        def same(a, b):
+            return a[1].lower() == b[1].lower() and a[2].lower() == b[2].lower()
+
+        for key, value in new_pairs.items():
+            if same(old_pairs.get(key, ("", "", "")), value):
+                continue
+            local_port, peer_name, peer_port = value
+            peer = resolve(peer_name)
+            if peer is None or peer.id.lower() in visited:
+                continue
+            self._reflect_link(peer, peer_port, device.id, local_port, visited)
+
+        for key, value in old_pairs.items():
+            current = new_pairs.get(key)
+            if current is not None and same(current, value):
+                continue
+            local_port, peer_name, peer_port = value
+            peer = resolve(peer_name)
+            if peer is None or peer.id.lower() in visited:
+                continue
+            self._unreflect_link(peer, peer_port, device.id, local_port, visited)
+
+    def _reflect_link(self, peer, peer_port, device_id, device_port, visited):
+        """Завести у соседа обратную запись — свой порт указал, что подключён сюда."""
+        existing = self._uplink_pairs(peer).get(peer_port.lower())
+        if existing is not None:
+            # Порт соседа уже занят — своим же линком (нечего делать) либо
+            # чужим (трогать не будем, это не наши данные).
+            return
+        peer.uplinks.append(format_link(peer_port, device_id, device_port))
+        self.save(peer, _visited=visited)
+
+    def _unreflect_link(self, peer, peer_port, device_id, device_port, visited):
+        """Убрать у соседа запись, которая указывала именно на этот линк."""
+        for index, entry in enumerate(peer.uplinks):
+            local_port, target_peer, target_port = parse_link(entry)
+            if (local_port.lower() == peer_port.lower()
+                    and target_peer.lower() == device_id.lower()
+                    and target_port.lower() == device_port.lower()):
+                del peer.uplinks[index]
+                self.save(peer, _visited=visited)
+                return
 
     def delete(self, device_id, delete_secret=True):
         path = self.device_path(device_id)
