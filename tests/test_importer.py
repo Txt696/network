@@ -105,9 +105,28 @@ class SwitchImportTest(unittest.TestCase):
 
     def test_unresolvable_peer_kept_as_portless_stub(self):
         # Сосед SB-AS-Master-rt ещё не в хранилище — сохраняем связь по имени.
-        entries = [e for e in self.device.uplinks if e.startswith("Gi1/0/1 ")]
-        self.assertEqual(entries, ["Gi1/0/1 -> SB-AS-Master-rt"])
+        entries = [e for e in self.device.uplinks if e.startswith("Po1 ")]
+        self.assertEqual(entries, ["Po1 -> SB-AS-Master-rt"])
         self.assertTrue(any("SB-AS-Master-rt" in h for h in self.hints))
+
+    def test_bundled_member_does_not_double_the_link(self):
+        # Gi1/0/1 — член Po1 (channel-group 1), и связь уже записана на Po1:
+        # вторая линия к тому же соседу на карте не нужна.
+        self.assertEqual([e for e in self.device.uplinks if e.startswith("Gi1/0/1 ")], [])
+        self.assertTrue(any("агрегат" in h for h in self.hints), self.hints)
+
+    def test_description_with_parenthetical_still_names_the_peer(self):
+        device, _hints = parse_config(
+            "hostname sw1\n!\ninterface GigabitEthernet1/0/1\n"
+            " description To BFN-AS-ME-tkm-CB-sw (new CBS350-24)\n"
+            " switchport mode trunk\n!\nend\n")
+        self.assertEqual(device.uplinks, ["Gi1/0/1 -> BFN-AS-ME-tkm-CB-sw"])
+
+    def test_for_is_read_as_an_uplink_just_like_to(self):
+        device, _hints = parse_config(
+            "hostname sw1\n!\ninterface Port-channel1\n"
+            " description For SB-AS-Master-rt\n!\nend\n")
+        self.assertEqual(device.uplinks, ["Po1 -> SB-AS-Master-rt"])
 
     def test_mgm_net1_hint_unresolved_without_catalog(self):
         entries = [e for e in self.device.uplinks if e.startswith("Gi1/0/10")]
@@ -203,9 +222,11 @@ class FolderImportTest(unittest.TestCase):
         # в одной папке: порт соседа должен проставиться с обеих сторон,
         # хотя в хранилище до импорта не было ни того, ни другого.
         import_files(self.vault, [self.configs])
-        self.assertIn("Gi1/0/1 -> sb-as-master-rt:Po1",
+        # Линк описан на агрегатах с обеих сторон (Po1 «For SB-AS-Master-rt»
+        # у свитча, Po1 «To BFN-AS-ME» у роутера) — он и становится связью.
+        self.assertIn("Po1 -> sb-as-master-rt:Po1",
                       self.vault.get("bfn-as-me-sb-sw").uplinks)
-        self.assertIn("Po1 -> bfn-as-me-sb-sw:Gi1/0/1",
+        self.assertIn("Po1 -> bfn-as-me-sb-sw:Po1",
                       self.vault.get("sb-as-master-rt").uplinks)
         # На карте эта пара портов — одна связь, а не две встречные.
         touching = [link for link in self.vault.links()
@@ -218,7 +239,7 @@ class FolderImportTest(unittest.TestCase):
         import_files(self.vault, [self.configs / "backup" / "router.cfg",
                                  self.configs / "switch.txt"])
         router = self.vault.get("sb-as-master-rt")
-        self.assertIn("Po1 -> bfn-as-me-sb-sw:Gi1/0/1", router.uplinks)
+        self.assertIn("Po1 -> bfn-as-me-sb-sw:Po1", router.uplinks)
 
     def test_reimport_updates_instead_of_duplicating(self):
         import_files(self.vault, [self.configs])
@@ -255,12 +276,12 @@ class FolderImportTest(unittest.TestCase):
     def test_config_wins_over_stale_uplink_of_the_same_port(self):
         import_files(self.vault, [self.configs / "switch.txt"])
         device = self.vault.get("bfn-as-me-sb-sw")
-        device.uplinks = ["Gi1/0/1 -> нет-такого:Te0/1"]
+        device.uplinks = ["Gi1/0/16 -> нет-такого:Te0/1"]
         self.vault.save(device)
 
         import_files(self.vault, [self.configs / "switch.txt"])
         ports_used = [entry for entry in self.vault.get("bfn-as-me-sb-sw").uplinks
-                      if entry.startswith("Gi1/0/1 ")]
+                      if entry.startswith("Gi1/0/16 ")]
         self.assertEqual(len(ports_used), 1, ports_used)
         self.assertNotIn("нет-такого", ports_used[0])
 
@@ -290,8 +311,27 @@ class FolderImportTest(unittest.TestCase):
         (self.configs / "switch.txt").write_text(second, encoding="utf-8")
         import_files(self.vault, [self.configs])
         uplinks = self.vault.get("bfn-as-me-sb-sw").uplinks
-        self.assertIn("Gi1/0/1 -> sb-as-master-rt:Po1", uplinks)
+        self.assertIn("Po1 -> sb-as-master-rt:Po1", uplinks)
         self.assertIn("Gi2/0/1 -> sb-as-master-rt", uplinks)
+
+    def test_similar_names_are_split_by_the_answering_side(self):
+        # «To BFN-AS-ME» подходит и к BFN-AS-ME-SB-sw, и к BFN-AS-ME-SB-tkm-sw.
+        # Решает встречная сторона: нас упоминает только первый.
+        tkm = Device(name="BFN-AS-ME-SB-tkm-sw", kind="switch",
+                     uplinks=["Gi1/0/1 -> BFN-AS-ME-tkm-CB-sw"])
+        me = Device(name="BFN-AS-ME-SB-sw", kind="switch",
+                    uplinks=["Po1 -> SB-AS-Master-rt"])
+        device, _hints = parse_config(ROUTER_CONFIG, catalog=[tkm, me])
+        # Заодно подхватился и порт соседа из его встречной записи.
+        self.assertIn("Po1 -> bfn-as-me-sb-sw:Po1", device.uplinks)
+
+    def test_similar_names_without_an_answer_stay_unresolved(self):
+        # Никто из похожих на нас не ссылается — гадать не надо, связь
+        # сохраняется по имени и достраивается позже.
+        twins = [Device(name="BFN-AS-ME-SB-sw", kind="switch"),
+                 Device(name="BFN-AS-ME-SB-tkm-sw", kind="switch")]
+        device, _hints = parse_config(ROUTER_CONFIG, catalog=twins)
+        self.assertIn("Po1 -> BFN-AS-ME", device.uplinks)
 
     def test_merge_keeps_identity_of_existing_device(self):
         parsed, _hints = parse_config(SWITCH_CONFIG)

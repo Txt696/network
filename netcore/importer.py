@@ -50,11 +50,16 @@ _ACCESS_VLAN = re.compile(r"^\s*switchport access vlan\s+(\d+)", re.MULTILINE)
 _TRUNK_MODE = re.compile(r"^\s*switchport mode trunk\s*$", re.MULTILINE)
 _TRUNK_VLANS = re.compile(r"^\s*switchport trunk allowed vlan\s+(add\s+)?(\S+)", re.MULTILINE)
 _SHUTDOWN = re.compile(r"^\s*shutdown\s*$", re.MULTILINE)
+_CHANNEL_GROUP = re.compile(r"^\s*channel-group\s+(\d+)", re.MULTILINE)
 
-# «description To core-sw-01», «To Balkan-Bank», «description to СЛУЖЕБНЫЙ» —
-# берём то, что после to/к, до первого разделителя вроде «Cross-1»/скобки/тире.
+# «description To core-sw-01», «For SB-AS-Master-rt», «To BFN-AS-ME (Port-channel1)»,
+# «To SB-AS-Master-rt Cross-1», «To TMCell (Vl40-SMS-Gate, Vl135-APN)» — берём имя
+# соседа после to/for/к/для и отбрасываем хвост: скобку с пояснением, перечисление
+# через запятую, номер кросса.
 _UPLINK_HINT = re.compile(
-    r"^(?:to|к)\s+([^,()]+?)(?:\s+(?:cross|кросс)[\s-]*\d+.*)?$", re.IGNORECASE)
+    r"^(?:to|for|к|для)\s+([^,(]+?)"
+    r"(?:\s*[,(].*)?"
+    r"(?:\s+(?:cross|кросс)[\s-]*\d*.*)?$", re.IGNORECASE)
 
 
 def _normalize_port_name(raw):
@@ -137,6 +142,7 @@ def parse_config(text, catalog=None):
     vlan_entries = []     # готовые строки для Device.vlans
     hints = []
     peer_hints = {}       # port -> сырой текст подсказки (для тех, кого не нашли)
+    channel_of = {}       # порт -> агрегат, в который он входит (channel-group)
 
     catalog = list(catalog or [])
     by_name = {d.name.strip().lower(): d for d in catalog}
@@ -154,7 +160,14 @@ def parse_config(text, catalog=None):
         candidates = [d for d in catalog
                      if key in d.name.lower() or d.name.lower() in key
                      or key in d.id.lower() or d.id.lower() in key]
-        return candidates[0] if len(candidates) == 1 else None
+        if len(candidates) == 1:
+            return candidates[0]
+        # Похожих несколько («To BFN-AS-ME» при BFN-AS-ME-SB-sw и
+        # BFN-AS-ME-SB-tkm-sw). Тогда спрашиваем встречную сторону: сосед
+        # тот, у кого в описаниях портов упомянуты мы. Если и так неясно —
+        # оставляем связь по имени, гадать не надо.
+        answering = [d for d in candidates if _refers_to(d, name)]
+        return answering[0] if len(answering) == 1 else None
 
     for raw_name, body in _iter_blocks(text):
         ip_match = _IP_ADDRESS.search(body)
@@ -180,6 +193,10 @@ def parse_config(text, catalog=None):
                 trunk_vlans.extend(v for v in vlan_list.replace(",", " ").split() if v)
             vlan_entries.append(ports.format_vlan(short_name, "trunk", trunk_vlans))
 
+        channel_match = _CHANNEL_GROUP.search(body)
+        if channel_match:
+            channel_of[short_name] = "Po" + channel_match.group(1)
+
         description_match = _DESCRIPTION.search(body)
         if description_match:
             hint_match = _UPLINK_HINT.match(description_match.group(1).strip())
@@ -187,6 +204,20 @@ def parse_config(text, catalog=None):
                 peer_hints[short_name] = hint_match.group(1).strip()
 
     port_groups = ports.compress(port_names)
+
+    # Порт, входящий в агрегат, не заводит вторую связь к тому же соседу:
+    # физически кабелей столько, сколько членов, но линк один и живёт на
+    # Port-channel. Описание члена («To SB-AS-Master-rt Cross-1») остаётся
+    # в конфиге, а на карте линия не задваивается.
+    bundled = sorted(port for port, aggregate in channel_of.items()
+                     if port in peer_hints and aggregate in peer_hints)
+    for port in bundled:
+        peer_hints.pop(port)
+    if bundled:
+        hints.append("Порты %s входят в агрегат — связь записана на %s, "
+                     "а не на каждом порту отдельно."
+                     % (", ".join(bundled),
+                        ", ".join(sorted({channel_of[p] for p in bundled}))))
 
     uplinks = []
     taken = set()          # порты соседей, уже занятые линком из этого конфига
@@ -237,6 +268,22 @@ def parse_config(text, catalog=None):
     if not device.mgmt_ip:
         hints.append("Не удалось однозначно определить IP управления — впишите его вручную.")
     return device, hints
+
+
+def _refers_to(device, name):
+    """Есть ли у устройства аплинк, указывающий на устройство с таким именем?
+
+    Сравнение такое же терпимое, как при поиске соседа: описания портов
+    называют друг друга то полным именем, то сокращённым.
+    """
+    key = (name or "").strip().lower()
+    if not key:
+        return False
+    for entry in device.uplinks:
+        target = links.parse(entry)[1].strip().lower()
+        if target and (target == key or target in key or key in target):
+            return True
+    return False
 
 
 def _find_reverse_port(peer, device_name, device_id=""):
