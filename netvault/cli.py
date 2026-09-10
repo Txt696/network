@@ -10,6 +10,7 @@
     python netvault/cli.py search "core cisco"
     python netvault/cli.py show core-sw-01 --secret
     python netvault/cli.py set-secret core-sw-01 --username admin
+    python netvault/cli.py import D:\\configs
     python netvault/cli.py export --format csv > inventory.csv
 
 Мастер-пароль спрашивается интерактивно; для скриптов можно передать его
@@ -26,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from netcore import CryptoError, Device, KINDS, Vault, VaultError  # noqa: E402
+from netcore import CryptoError, Device, KINDS, Vault, VaultError, importer  # noqa: E402
 from netcore.secretstore import FIELDS as SECRET_FIELDS  # noqa: E402
 from netvault import appconfig  # noqa: E402
 
@@ -228,6 +229,18 @@ def cmd_export(args):
             ])
 
 
+def cmd_import(args):
+    """Импорт running-config: файлами или целой папкой сразу."""
+    vault = open_vault(args, unlock=False)
+    report = importer.import_files(vault, args.path, recursive=not args.flat,
+                                   site=args.site or "")
+    if not report:
+        raise SystemExit("Конфигов не найдено: %s" % ", ".join(args.path))
+    print(importer.format_report(report))
+    if any(record["action"] == "failed" for record in report):
+        raise SystemExit(1)
+
+
 def cmd_doctor(args):
     vault = open_vault(args, unlock=False)
     stats = vault.stats()
@@ -321,6 +334,13 @@ def build_parser():
     p_export = sub.add_parser("export", help="выгрузить инвентарь (без паролей)")
     p_export.add_argument("--format", choices=("csv", "json"), default="csv")
     p_export.set_defaults(func=cmd_export)
+
+    p_import = sub.add_parser("import", help="импорт конфигов Cisco (файл или папка)")
+    p_import.add_argument("path", nargs="+", help="файлы конфигов и/или папки с ними")
+    p_import.add_argument("--site", help="площадка для новых устройств")
+    p_import.add_argument("--flat", action="store_true",
+                          help="не заходить в подпапки")
+    p_import.set_defaults(func=cmd_import)
 
     sub.add_parser("doctor", help="проверить хранилище на ошибки").set_defaults(func=cmd_doctor)
     return parser

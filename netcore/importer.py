@@ -17,9 +17,10 @@
 """
 
 import re
+from pathlib import Path
 
 from . import links, ports
-from .models import Device, valid_ip
+from .models import Device, slugify, valid_ip
 
 # Полное имя интерфейса, как его печатает IOS -> короткое, как в netcore.ports.
 IOS_PORT_NAMES = {
@@ -188,6 +189,7 @@ def parse_config(text, catalog=None):
     port_groups = ports.compress(port_names)
 
     uplinks = []
+    taken = set()          # порты соседей, уже занятые линком из этого конфига
     for port, hint_text in peer_hints.items():
         peer = find_peer(hint_text)
         if peer is None:
@@ -205,6 +207,13 @@ def parse_config(text, catalog=None):
         # указания порта на этой стороне, — подставляем его: обе стороны
         # получают полный линк уже при импорте, а не только после ручной правки.
         peer_port = _find_reverse_port(peer, name)
+        # Один порт соседа — один линк. Два наших порта с одинаковым
+        # описанием (обычно члены одного агрегата) не могут оба сидеть в
+        # его Po1: второму оставляем связь без порта, чем врать про порт.
+        if peer_port and (peer.id.lower(), peer_port.lower()) in taken:
+            peer_port = ""
+        if peer_port:
+            taken.add((peer.id.lower(), peer_port.lower()))
         uplinks.append(links.format(port, peer.id, peer_port))
 
     mgmt_ip = _pick_mgmt_ip(interfaces)
@@ -230,15 +239,194 @@ def parse_config(text, catalog=None):
     return device, hints
 
 
-def _find_reverse_port(peer, device_name):
+def _find_reverse_port(peer, device_name, device_id=""):
     """У соседа уже есть порт, аплинк которого (без указания порта) смотрит
-    на устройство с этим именем/id? Вернуть такой порт соседа, иначе "".
+    на это устройство? Вернуть такой порт соседа, иначе "".
+
+    Точное совпадение имени/id — лучший случай. Но в описаниях порт часто
+    называет соседа сокращённо («To BFN-AS-ME» при хосте BFN-AS-ME-SB-sw),
+    поэтому при отсутствии точного берём и совпадение по вхождению — и
+    только если оно единственное: гадать, какой из похожих портов наш,
+    хуже, чем оставить порт соседа незаполненным.
     """
-    if not device_name:
+    keys = {key.strip().lower() for key in (device_name, device_id) if (key or "").strip()}
+    if not keys:
         return ""
-    key = device_name.strip().lower()
+    exact, fuzzy = [], []
     for entry in peer.uplinks:
         local_port, target, target_port = links.parse(entry)
-        if local_port and not target_port and target.strip().lower() == key:
-            return local_port
-    return ""
+        if not local_port or target_port:
+            continue
+        key = target.strip().lower()
+        if key in keys:
+            exact.append(local_port)
+        elif any(key in known or known in key for known in keys):
+            fuzzy.append(local_port)
+    if exact:
+        return exact[0]
+    return fuzzy[0] if len(fuzzy) == 1 else ""
+
+
+# --------------------------------------------------------- пакетный импорт
+
+# Чем обычно называют выгруженный конфиг. Расширение — только фильтр для
+# папки: файл, выбранный руками, читается с любым именем.
+CONFIG_SUFFIXES = (".txt", ".cfg", ".conf", ".log", ".ios", ".run", ".rsc")
+
+
+def collect_files(paths, recursive=True):
+    """Пути (файлы и/или папки) -> отсортированный список файлов конфигов.
+
+    Папка разворачивается в лежащие в ней файлы с подходящим расширением
+    (по умолчанию вместе с подпапками); файл берётся как есть, каким бы
+    ни было его имя. Дубли путей отбрасываются.
+    """
+    found, seen = [], set()
+    for raw in paths or []:
+        path = Path(raw)
+        if path.is_dir():
+            pattern = "**/*" if recursive else "*"
+            items = sorted(item for item in path.glob(pattern)
+                           if item.is_file() and item.suffix.lower() in CONFIG_SUFFIXES)
+        elif path.is_file():
+            items = [path]
+        else:
+            continue
+        for item in items:
+            key = str(item.resolve())
+            if key not in seen:
+                seen.add(key)
+                found.append(item)
+    return found
+
+
+def _blend_uplinks(existing, parsed):
+    """Аплинки конфига поверх уже записанных, по своему порту.
+
+    Конфиг знает только о портах, у которых есть описание соседа: остальные
+    он не «отменяет», он про них просто молчит. Поэтому запись из конфига
+    вытесняет прежнюю запись того же порта, а аплинки портов, которых в
+    конфиге не было (проставленные руками или пришедшие обратной
+    синхронизацией от соседа), остаются на месте.
+    """
+    taken = {links.parse(entry)[0].lower() for entry in parsed
+             if links.parse(entry)[0]}
+    kept = [entry for entry in existing or []
+            if links.parse(entry)[0].lower() not in taken]
+    return list(parsed) + kept
+
+
+def merge_into(existing, parsed):
+    """Наложить разобранный конфиг на уже существующую карточку.
+
+    Сеть (порты/VLAN/IP/вендор/аплинки) берём из конфига — он свежее.
+    Всё остальное (теги, площадку, стойку, ссылку на доступы, статус)
+    трогать незачем: это ручные данные, конфиг о них ничего не знает.
+    """
+    fields = existing.to_meta()
+    fields.update({
+        "name": parsed.name or existing.name,
+        "kind": parsed.kind,
+        "mgmt_ip": parsed.mgmt_ip or existing.mgmt_ip,
+        "vendor": parsed.vendor or existing.vendor,
+        "protocol": parsed.protocol or existing.protocol,
+        "ports": parsed.ports,
+        "uplinks": _blend_uplinks(existing.uplinks, parsed.uplinks),
+        "vlans": parsed.vlans,
+        "created": existing.created,
+    })
+    body = existing.body
+    if parsed.body.strip() and parsed.body.strip() not in body:
+        body = (body.rstrip() + "\n\n" + parsed.body).strip()
+    return Device(device_id=existing.id, body=body, **fields)
+
+
+def import_files(vault, paths, recursive=True, site=""):
+    """Разобрать и сохранить в хранилище сразу пачку конфигов.
+
+    Читает все файлы, разбирает их дважды: первый раз — чтобы узнать, какие
+    устройства вообще есть в этой пачке, второй — уже зная их, чтобы
+    описания вида «description To core-sw-01» находили соседа даже тогда,
+    когда его собственный конфиг лежит в той же папке. Дальше каждое
+    устройство сохраняется: одноимённое обновляется, новое заводится.
+    `site` проставляется только новым записям — у существующих площадка
+    заполнена руками, и конфиг о ней ничего не знает.
+
+    Возвращает список записей по файлу:
+    {"path", "name", "device_id", "action", "ports", "vlans", "uplinks",
+     "hints", "error"}, где action — created / updated / failed.
+    """
+    report = []
+    drafts = []                     # [(path, черновик, существующий|None, запись)]
+    stored = vault.devices()
+    by_key = {d.name.strip().lower(): d for d in stored}
+
+    for path in collect_files(paths, recursive):
+        record = {"path": str(path), "name": "", "device_id": "", "action": "failed",
+                  "ports": 0, "vlans": 0, "uplinks": 0, "hints": [], "error": ""}
+        report.append(record)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            record["error"] = "не удалось прочитать файл: %s" % exc
+            continue
+        if not _HOSTNAME.search(text.replace("\r\n", "\n")):
+            # Имя устройства пакетному импорту взять неоткуда (в отличие от
+            # импорта одного файла, где его можно вписать руками в форму).
+            record["error"] = ("в файле нет команды hostname — не похоже на "
+                               "конфигурацию Cisco")
+            continue
+        device, _hints = parse_config(text, catalog=stored)
+        key = device.name.strip().lower()
+        existing = by_key.get(key) or next(
+            (d for d in stored if d.id == slugify(device.name)), None)
+        # id решаем сразу: во втором проходе соседи ссылаются друг на друга
+        # именно по нему, и он должен совпасть с тем, под которым сохранимся.
+        device.id = existing.id if existing is not None else vault.unique_id(device.name)
+        record["name"] = device.name
+        drafts.append((path, device, existing, record))
+
+    # Второй проход: теперь в каталоге есть и соседи из этой же пачки.
+    batch = [draft for _p, draft, _e, _r in drafts]
+    for path, first_pass, existing, record in drafts:
+        catalog = [d for d in stored if d.id != first_pass.id]
+        catalog += [d for d in batch if d.id != first_pass.id]
+        device, hints = parse_config(path.read_text(encoding="utf-8", errors="replace"),
+                                     catalog=catalog)
+        device.id = first_pass.id
+        if existing is not None:
+            device = merge_into(existing, device)
+            record["action"] = "updated"
+        else:
+            device.site = site
+            record["action"] = "created"
+        try:
+            vault.save(device)
+        except (OSError, ValueError) as exc:
+            record["action"] = "failed"
+            record["error"] = "не удалось сохранить: %s" % exc
+            continue
+        record.update({"device_id": device.id, "hints": hints,
+                       "ports": len(device.ports), "vlans": len(device.vlans),
+                       "uplinks": len(device.uplinks)})
+    return report
+
+
+def format_report(report):
+    """Отчёт пакетного импорта человеческим текстом."""
+    ok = [r for r in report if r["action"] != "failed"]
+    bad = [r for r in report if r["action"] == "failed"]
+    lines = ["Файлов обработано: %d, устройств записано: %d." % (len(report), len(ok))]
+    for record in ok:
+        lines.append("%s — %s: %s, портов %d, VLAN %d, аплинков %d"
+                     % (Path(record["path"]).name, record["device_id"],
+                        "обновлено" if record["action"] == "updated" else "добавлено",
+                        record["ports"], record["vlans"], record["uplinks"]))
+        for hint in record["hints"]:
+            lines.append("    · " + hint)
+    if bad:
+        lines.append("")
+        lines.append("Пропущено:")
+        for record in bad:
+            lines.append("%s — %s" % (Path(record["path"]).name, record["error"]))
+    return "\n".join(lines)

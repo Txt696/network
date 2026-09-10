@@ -1,12 +1,15 @@
 """Тесты разбора конфигурации Cisco в устройство (netcore/importer.py)."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from netcore.importer import parse_config  # noqa: E402
+from netcore import Vault  # noqa: E402
+from netcore.importer import (  # noqa: E402
+    collect_files, format_report, import_files, merge_into, parse_config)
 from netcore.models import Device  # noqa: E402
 
 SWITCH_CONFIG = """\
@@ -157,3 +160,144 @@ class EdgeCaseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FolderImportTest(unittest.TestCase):
+    """Пакетный импорт: папка конфигов -> заполненное хранилище."""
+
+    PASSWORD = "test-master-password"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.configs = root / "configs"
+        (self.configs / "backup").mkdir(parents=True)
+        (self.configs / "switch.txt").write_text(SWITCH_CONFIG, encoding="utf-8")
+        (self.configs / "backup" / "router.cfg").write_text(ROUTER_CONFIG, encoding="utf-8")
+        (self.configs / "readme.md").write_text("не конфиг", encoding="utf-8")
+        self.vault = Vault.create(root / "vault", self.PASSWORD)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_collect_files_takes_configs_recursively(self):
+        names = [path.name for path in collect_files([self.configs])]
+        self.assertEqual(names, ["router.cfg", "switch.txt"])
+
+    def test_collect_files_can_stay_flat(self):
+        names = [path.name for path in collect_files([self.configs], recursive=False)]
+        self.assertEqual(names, ["switch.txt"])
+
+    def test_collect_files_drops_duplicate_paths(self):
+        both = collect_files([self.configs, self.configs / "switch.txt"])
+        self.assertEqual([path.name for path in both], ["router.cfg", "switch.txt"])
+
+    def test_folder_import_writes_every_device(self):
+        report = import_files(self.vault, [self.configs])
+        self.assertEqual([record["action"] for record in report], ["created", "created"])
+        self.assertEqual(sorted(device.id for device in self.vault.devices()),
+                         ["bfn-as-me-sb-sw", "sb-as-master-rt"])
+
+    def test_link_inside_batch_is_filled_on_both_sides(self):
+        # Свитч ссылается на роутер, роутер — на свитч, и оба конфига лежат
+        # в одной папке: порт соседа должен проставиться с обеих сторон,
+        # хотя в хранилище до импорта не было ни того, ни другого.
+        import_files(self.vault, [self.configs])
+        self.assertIn("Gi1/0/1 -> sb-as-master-rt:Po1",
+                      self.vault.get("bfn-as-me-sb-sw").uplinks)
+        self.assertIn("Po1 -> bfn-as-me-sb-sw:Gi1/0/1",
+                      self.vault.get("sb-as-master-rt").uplinks)
+        # На карте эта пара портов — одна связь, а не две встречные.
+        touching = [link for link in self.vault.links()
+                    if {link["source"], link["target"]}
+                    == {"bfn-as-me-sb-sw", "sb-as-master-rt"}]
+        self.assertEqual(len(touching), 1, touching)
+
+    def test_batch_result_does_not_depend_on_file_order(self):
+        # Обратный порядок обхода даёт то же самое: разбор идёт в два прохода.
+        import_files(self.vault, [self.configs / "backup" / "router.cfg",
+                                 self.configs / "switch.txt"])
+        router = self.vault.get("sb-as-master-rt")
+        self.assertIn("Po1 -> bfn-as-me-sb-sw:Gi1/0/1", router.uplinks)
+
+    def test_reimport_updates_instead_of_duplicating(self):
+        import_files(self.vault, [self.configs])
+        device = self.vault.get("bfn-as-me-sb-sw")
+        device.site, device.tags, device.rack = "Балкан", ["core"], "R12"
+        self.vault.save(device)
+
+        report = import_files(self.vault, [self.configs])
+        self.assertEqual([record["action"] for record in report], ["updated", "updated"])
+        self.assertEqual(len(self.vault.devices()), 2)
+        again = self.vault.get("bfn-as-me-sb-sw")
+        self.assertEqual((again.site, again.tags, again.rack), ("Балкан", ["core"], "R12"))
+        self.assertEqual(again.mgmt_ip, "10.240.40.4")
+
+    def test_site_is_set_on_new_devices_only(self):
+        import_files(self.vault, [self.configs / "switch.txt"], site="Ашхабад")
+        self.assertEqual(self.vault.get("bfn-as-me-sb-sw").site, "Ашхабад")
+        import_files(self.vault, [self.configs], site="Балкан")
+        self.assertEqual(self.vault.get("bfn-as-me-sb-sw").site, "Ашхабад")
+        self.assertEqual(self.vault.get("sb-as-master-rt").site, "Балкан")
+
+    def test_manual_uplink_on_untouched_port_survives_reimport(self):
+        # Конфиг знает только о портах с описанием соседа; про Gi1/0/14
+        # он молчит — значит, ручную настройку этого порта импорт не трогает.
+        import_files(self.vault, [self.configs / "switch.txt"])
+        device = self.vault.get("bfn-as-me-sb-sw")
+        device.uplinks.append("Gi1/0/14 -> sb-as-master-rt:Gi0/0/3")
+        self.vault.save(device)
+
+        import_files(self.vault, [self.configs / "switch.txt"])
+        self.assertIn("Gi1/0/14 -> sb-as-master-rt:Gi0/0/3",
+                      self.vault.get("bfn-as-me-sb-sw").uplinks)
+
+    def test_config_wins_over_stale_uplink_of_the_same_port(self):
+        import_files(self.vault, [self.configs / "switch.txt"])
+        device = self.vault.get("bfn-as-me-sb-sw")
+        device.uplinks = ["Gi1/0/1 -> нет-такого:Te0/1"]
+        self.vault.save(device)
+
+        import_files(self.vault, [self.configs / "switch.txt"])
+        ports_used = [entry for entry in self.vault.get("bfn-as-me-sb-sw").uplinks
+                      if entry.startswith("Gi1/0/1 ")]
+        self.assertEqual(len(ports_used), 1, ports_used)
+        self.assertNotIn("нет-такого", ports_used[0])
+
+    def test_file_without_hostname_is_reported_not_fatal(self):
+        (self.configs / "broken.txt").write_text(NO_HOSTNAME_CONFIG, encoding="utf-8")
+        report = import_files(self.vault, [self.configs])
+        broken = [record for record in report if record["path"].endswith("broken.txt")][0]
+        self.assertEqual(broken["action"], "failed")
+        self.assertIn("hostname", broken["error"])
+        self.assertEqual(len(self.vault.devices()), 2)
+        self.assertIn("Пропущено", format_report(report))
+
+    def test_missing_path_is_simply_empty(self):
+        self.assertEqual(import_files(self.vault, [self.configs / "нет-такой-папки"]), [])
+
+    def test_peer_port_is_not_handed_to_two_ports_at_once(self):
+        # Два порта свитча описаны одинаково («To SB-AS-Master-rt»), но Po1
+        # роутера физически один: он достаётся первому, второй остаётся
+        # связью без порта, а не вторым владельцем того же порта.
+        second = SWITCH_CONFIG.replace(
+            "interface GigabitEthernet1/0/16",
+            "interface GigabitEthernet2/0/1\n"
+            " description To SB-AS-Master-rt Cross-2\n"
+            " switchport mode trunk\n"
+            "!\n"
+            "interface GigabitEthernet1/0/16")
+        (self.configs / "switch.txt").write_text(second, encoding="utf-8")
+        import_files(self.vault, [self.configs])
+        uplinks = self.vault.get("bfn-as-me-sb-sw").uplinks
+        self.assertIn("Gi1/0/1 -> sb-as-master-rt:Po1", uplinks)
+        self.assertIn("Gi2/0/1 -> sb-as-master-rt", uplinks)
+
+    def test_merge_keeps_identity_of_existing_device(self):
+        parsed, _hints = parse_config(SWITCH_CONFIG)
+        existing = Device(device_id="old-id", name="BFN-AS-ME-SB-sw", kind="other",
+                          site="Балкан", secret="secret-123")
+        merged = merge_into(existing, parsed)
+        self.assertEqual((merged.id, merged.site, merged.secret),
+                         ("old-id", "Балкан", "secret-123"))
+        self.assertEqual(merged.kind, "switch")

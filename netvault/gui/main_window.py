@@ -134,6 +134,8 @@ class MainWindow:
         device_menu.add_command(label="Удалить", command=self.delete_device)
         device_menu.add_separator()
         device_menu.add_command(label="Импортировать конфиг…", command=self.import_config)
+        device_menu.add_command(label="Импортировать папку с конфигами…",
+                                command=self.import_folder)
         device_menu.add_command(label="Открыть заметку в системе", command=self.open_note_externally)
 
         view_menu = tk.Menu(menubar, tearoff=0)
@@ -192,8 +194,13 @@ class MainWindow:
         buttons.pack(fill=tk.X, pady=4)
         ttk.Button(buttons, text="+ Устройство", command=self.new_device).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Удалить", command=self.delete_device).pack(side=tk.LEFT, padx=4)
-        ttk.Button(left, text="Импорт конфига…",
-                  command=self.import_config).pack(fill=tk.X, pady=(0, 4))
+        imports = ttk.Frame(left)
+        imports.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(imports, text="Импорт конфига…",
+                  command=self.import_config).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(imports, text="Импорт папки…",
+                  command=self.import_folder).pack(side=tk.LEFT, fill=tk.X,
+                                                   expand=True, padx=(4, 0))
 
         right = ttk.Frame(paned)
         paned.add(right, weight=3)
@@ -745,7 +752,7 @@ class MainWindow:
             if answer is None:
                 return
             if answer:
-                parsed = self._merge_into_existing(existing, parsed)
+                parsed = importer.merge_into(existing, parsed)
                 self.current_id = existing.id
             else:
                 self.current_id = None
@@ -766,30 +773,54 @@ class MainWindow:
                 "Импорт конфигурации — на что обратить внимание",
                 "\n\n".join(hints))
 
-    @staticmethod
-    def _merge_into_existing(existing, parsed):
-        """Наложить разобранный конфиг на уже существующую карточку.
+    def import_folder(self):
+        """Импорт целой папки конфигов: разобрать все файлы и записать сразу.
 
-        Сеть (порты/VLAN/IP/вендор/аплинки) берём из конфига — он свежее.
-        Всё остальное (теги, площадку, стойку, ссылку на доступы, статус)
-        трогать незачем, это ручные данные, конфиг о них ничего не знает.
+        В отличие от импорта одного файла форма тут ни при чём — устройств
+        много, каждое ложится в хранилище само (одноимённое обновляется,
+        новое заводится), а связи между ними достраиваются по описаниям
+        портов уже внутри пачки.
         """
-        fields = existing.to_meta()
-        fields.update({
-            "name": parsed.name or existing.name,
-            "kind": parsed.kind,
-            "mgmt_ip": parsed.mgmt_ip or existing.mgmt_ip,
-            "vendor": parsed.vendor or existing.vendor,
-            "protocol": parsed.protocol or existing.protocol,
-            "ports": parsed.ports,
-            "uplinks": parsed.uplinks,
-            "vlans": parsed.vlans,
-            "created": existing.created,
-        })
-        body = existing.body
-        if parsed.body.strip() and parsed.body.strip() not in body:
-            body = (body.rstrip() + "\n\n" + parsed.body).strip()
-        return Device(device_id=existing.id, body=body, **fields)
+        if not self.vault:
+            messagebox.showinfo(APP_NAME, "Сначала откройте или создайте хранилище",
+                                parent=self.root)
+            return
+        if not self._confirm_discard():
+            return
+        folder = filedialog.askdirectory(title="Папка с конфигами устройств")
+        if not folder:
+            return
+        files = importer.collect_files([folder])
+        if not files:
+            messagebox.showinfo(
+                APP_NAME, "В папке нет файлов конфигов (%s):\n%s"
+                % (", ".join(importer.CONFIG_SUFFIXES), folder), parent=self.root)
+            return
+        if not messagebox.askyesno(
+                APP_NAME,
+                "Найдено файлов: %d.\n\nРазобрать их и записать устройства в "
+                "хранилище? Одноимённые устройства будут обновлены сетевыми "
+                "данными из конфигов (теги, площадка, стойка и доступы "
+                "останутся как есть)." % len(files), parent=self.root):
+            return
+
+        self.status_label.config(text="Импорт папки: %d файл(ов)…" % len(files))
+        self.root.update_idletasks()
+        try:
+            report = importer.import_files(self.vault, [folder])
+        except (OSError, ValueError, VaultError) as exc:
+            messagebox.showerror(APP_NAME, "Импорт не удался: %s" % exc, parent=self.root)
+            self.status_label.config(text="Импорт не удался")
+            return
+
+        written = [record for record in report if record["action"] != "failed"]
+        self.current_id = None
+        self._clear_form()
+        self.refresh_tree()
+        self.status_label.config(
+            text="Импортировано устройств: %d из %d файлов" % (len(written), len(report)))
+        self._show_text_window("Импорт папки с конфигами",
+                               importer.format_report(report))
 
     def duplicate_device(self):
         if not self.current_id:
