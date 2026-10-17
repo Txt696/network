@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Сборка NetVault, NetMaster и NetMap в самостоятельные программы.
+Сборка NetVault, NetMaster, NetMap и NetWatch в самостоятельные программы.
 
-    python build.py            собрать все три, каждая — один файл
+    python build.py            собрать все, каждая — один файл
     python build.py netmaster  собрать только NetMaster
     python build.py --folder   папкой вместо одного файла (запускается быстрее)
 
-На Windows получатся dist\\NetVault.exe, dist\\NetMaster.exe и dist\\NetMap.exe —
+На Windows получатся dist\\NetVault.exe, NetMaster.exe, NetMap.exe и NetWatch.exe —
 их можно скопировать на другой компьютер, Python там не нужен. Собирать надо
 на той системе, для которой нужна программа: exe собирается только на Windows.
 """
@@ -27,11 +27,17 @@ APPS = {
     "netvault": ("NetVault", ROOT / "netvault" / "main.py", ROOT / "packaging" / "netvault.ico"),
     "netmaster": ("NetMaster", ROOT / "netmaster" / "main.py", ROOT / "packaging" / "netmaster.ico"),
     "netmap": ("NetMap", ROOT / "netweb" / "main.py", ROOT / "packaging" / "netmap.ico"),
+    "netwatch": ("NetWatch", ROOT / "netwatch" / "main.py", ROOT / "packaging" / "netwatch.ico"),
 }
 
-# Страница карты — не код, её надо положить внутрь сборки отдельно.
+# NetWatch работает как служба на сервере: окно консоли показывает адрес
+# страницы и ошибки, а --once печатает таблицу. Остальным консоль не нужна.
+CONSOLE_APPS = {"netwatch"}
+
+# Страницы карты и мониторинга — не код, их надо положить внутрь сборки отдельно.
 EXTRA_DATA = {
     "netmap": [(ROOT / "netweb" / "static" / "map.html", "netweb/static")],
+    "netwatch": [(ROOT / "netwatch" / "static" / "watch.html", "netwatch/static")],
 }
 
 
@@ -39,7 +45,8 @@ def build(key, onefile=True):
     name, entry, icon = APPS[key]
     print("\n=== Собираю %s ===" % name)
     args = [
-        sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--noupx",
+        sys.executable, "-m", "PyInstaller", "--noconfirm", "--noupx",
+        "--console" if key in CONSOLE_APPS else "--windowed",
         "--onefile" if onefile else "--onedir",
         "--name", name,
         "--paths", str(ROOT),
@@ -82,9 +89,9 @@ def use_utf8():
 
 def main(argv=None):
     use_utf8()
-    parser = argparse.ArgumentParser(description="Сборка NetVault и NetMaster")
+    parser = argparse.ArgumentParser(description="Сборка NetVault, NetMaster, NetMap и NetWatch")
     parser.add_argument("apps", nargs="*", metavar="ПРОГРАММА",
-                        help="netvault, netmaster, netmap (по умолчанию все)")
+                        help="netvault, netmaster, netmap, netwatch (по умолчанию все)")
     parser.add_argument("--folder", action="store_true",
                         help="собрать папкой, а не одним файлом (запуск быстрее)")
     parser.add_argument("--no-check", action="store_true",

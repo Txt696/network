@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мониторинг ПК в домене</title>
+<style>
+  :root {
+    --bg: #12161c; --panel: #1b212b; --line: #2c3542;
+    --text: #dbe2ea; --dim: #8a97a8; --accent: #569cd6;
+    --online: #6acd82; --domain: #f4a261; --offline: #e9c46a;
+    --lost: #f48771; --disabled: #6b7685;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 "Segoe UI", Arial, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px;
+           padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  header .info { color: var(--dim); font-size: 13px; }
+  header .tools { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+  input, button, .button { background: #10141a; color: var(--text); font: inherit;
+         border: 1px solid var(--line); border-radius: 4px; padding: 6px 12px; }
+  input { width: 260px; max-width: 100%; }
+  button, .button { cursor: pointer; text-decoration: none; }
+  button:hover, .button:hover { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .error { margin: 12px 16px 0; padding: 8px 12px; border: 1px solid var(--lost);
+           border-radius: 4px; color: var(--lost); background: rgba(244,135,113,.08); }
+  .error:empty { display: none; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 16px 0; }
+  .chip { display: flex; align-items: baseline; gap: 8px; padding: 8px 14px; cursor: pointer;
+          background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+          user-select: none; }
+  .chip b { font-size: 20px; font-weight: 600; }
+  .chip.active { border-color: var(--accent); background: #1f2a38; }
+  main { display: flex; gap: 16px; padding: 12px 16px 16px; align-items: flex-start; }
+  .table-wrap { flex: 1; min-width: 0; overflow-x: auto; background: var(--panel);
+                border: 1px solid var(--line); border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th { color: var(--dim); font-weight: 600; font-size: 13px; cursor: pointer;
+       position: sticky; top: 0; background: var(--panel); }
+  th.sorted::after { content: " ▾"; }
+  th.sorted.up::after { content: " ▴"; }
+  tr:last-child td { border-bottom: 0; }
+  td.wrap { white-space: normal; min-width: 160px; }
+  .dim { color: var(--dim); }
+  .status { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+  .s-online { --c: var(--online); } .s-domain { --c: var(--domain); }
+  .s-offline { --c: var(--offline); } .s-lost { --c: var(--lost); }
+  .s-disabled { --c: var(--disabled); }
+  .dot { background: var(--c, var(--dim)); }
+  .status-text { color: var(--c, var(--text)); }
+  aside { width: 320px; flex: none; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 6px; padding: 12px 14px; max-height: calc(100vh - 150px); overflow: auto; }
+  aside h2 { font-size: 15px; margin: 0 0 8px; }
+  aside ul { list-style: none; margin: 0; padding: 0; }
+  aside li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  aside li:last-child { border-bottom: 0; }
+  .empty { padding: 24px; text-align: center; color: var(--dim); }
+  @media (max-width: 900px) {
+    main { flex-direction: column; align-items: stretch; }
+    aside { width: 100%; max-height: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Мониторинг ПК в домене</h1>
+  <span class="info" id="info">Загрузка…</span>
+  <div class="tools">
+    <input id="search" placeholder="Поиск: имя, IP, ОС, подразделение">
+    <button id="check">Проверить сейчас</button>
+    <a class="button" href="/api/export.csv">Скачать CSV</a>
+  </div>
+</header>
+<div class="error" id="error"></div>
+<div class="chips" id="chips"></div>
+<main>
+  <div class="table-wrap">
+    <table>
+      <thead><tr id="head"></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>Компьютеров нет — список ещё не загружен.</div>
+  </div>
+  <aside>
+    <h2>События</h2>
+    <ul id="events"></ul>
+  </aside>
+</main>
+
+<script>
+const ORDER = ["online", "domain", "offline", "lost", "disabled"];
+const COLUMNS = [
+  ["status", "Статус"], ["name", "Компьютер"], ["address", "IP"], ["os", "ОС"],
+  ["ou", "Подразделение"], ["last_seen", "Последний ответ"], ["since", "В статусе"],
+  ["last_logon", "Вход в домен"], ["description", "Описание"],
+];
+const REFRESH_MS = 10000;
+let data = null, filterStatus = "", sortKey = "status", sortUp = true;
+
+const $ = id => document.getElementById(id);
+
+function node(tag, attrs = {}, ...children) {
+  const element = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "text") element.textContent = value;
+    else element.setAttribute(key, value);
+  }
+  for (const child of children) if (child) element.appendChild(child);
+  return element;
+}
+
+function ago(stamp) {
+  if (!stamp) return "—";
+  const seconds = Math.max(0, data.now - stamp);
+  if (seconds < 90) return "только что";
+  if (seconds < 3600) return Math.round(seconds / 60) + " мин назад";
+  if (seconds < 86400 * 2) return Math.round(seconds / 3600) + " ч назад";
+  return Math.round(seconds / 86400) + " дн назад";
+}
+
+function plural(count, one, few, many) {
+  const tens = count % 100, units = count % 10;
+  const word = tens > 10 && tens < 20 ? many : units === 1 ? one : units > 1 && units < 5 ? few : many;
+  return count + " " + word;
+}
+
+const fullTime = stamp => stamp ? new Date(stamp * 1000).toLocaleString("ru-RU") : "";
+
+function statusBadge(status) {
+  return node("span", { class: "status s-" + status },
+    node("span", { class: "dot" }),
+    node("span", { class: "status-text", text: data.labels[status] || status || "—" }));
+}
+
+async function load() {
+  try {
+    const response = await fetch("/api/status", { cache: "no-store" });
+    data = await response.json();
+  } catch (error) {
+    $("error").textContent = "Нет связи с программой мониторинга: " + error.message;
+    return;
+  }
+  render();
+}
+
+function render() {
+  const cycle = data.cycle || {};
+  const parts = [plural(data.computers.length, "компьютер", "компьютера", "компьютеров"), data.source]
+    .filter(Boolean);
+  if (data.busy) parts.push("идёт проверка…");
+  else if (cycle.finished) parts.push("проверено " + ago(cycle.finished) +
+                                      (cycle.duration ? ` за ${cycle.duration} с` : ""));
+  $("info").textContent = parts.join(" · ");
+  $("info").title = `Интервал ${data.interval} с · «пропал» после ${data.lost_days} дн` +
+                    ` · «нет связи с доменом» после ${data.stale_days} дн без входа в домен`;
+  $("error").textContent = cycle.error || "";
+  $("check").disabled = data.busy;
+  renderChips();
+  renderTable();
+  renderEvents();
+}
+
+function renderChips() {
+  const chips = $("chips");
+  chips.replaceChildren();
+  const all = node("div", { class: "chip" + (filterStatus ? "" : " active") },
+    node("b", { text: data.computers.length }), node("span", { text: "Все" }));
+  all.onclick = () => { filterStatus = ""; render(); };
+  chips.appendChild(all);
+  for (const status of ORDER) {
+    const chip = node("div", { class: `chip s-${status}` + (filterStatus === status ? " active" : "") },
+      node("b", { class: "status-text", text: data.counts[status] || 0 }),
+      node("span", { text: data.labels[status] }));
+    chip.onclick = () => { filterStatus = filterStatus === status ? "" : status; render(); };
+    chips.appendChild(chip);
+  }
+}
+
+function sortValue(record, key) {
+  if (key === "status") return ORDER.indexOf(record.status);
+  if (["last_seen", "since", "last_logon"].includes(key)) return record[key] || 0;
+  if (key === "address") return (record.address || "").split(".").map(n => n.padStart(3, "0")).join(".");
+  return String(record[key] || "").toLowerCase();
+}
+
+function renderTable() {
+  const head = $("head");
+  head.replaceChildren();
+  for (const [key, title] of COLUMNS) {
+    const th = node("th", { text: title, class: key === sortKey ? "sorted" + (sortUp ? " up" : "") : "" });
+    th.onclick = () => { sortUp = key === sortKey ? !sortUp : true; sortKey = key; renderTable(); };
+    head.appendChild(th);
+  }
+
+  const query = $("search").value.trim().toLowerCase();
+  const records = data.computers
+    .filter(record => !filterStatus || record.status === filterStatus)
+    .filter(record => !query || [record.name, record.address, record.os, record.ou,
+      record.description, record.host].join(" ").toLowerCase().includes(query))
+    .sort((a, b) => {
+      const x = sortValue(a, sortKey), y = sortValue(b, sortKey);
+      const order = x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name);
+      return sortUp ? order : -order;
+    });
+
+  const rows = $("rows");
+  rows.replaceChildren();
+  for (const record of records) {
+    const seen = node("td", { text: ago(record.last_seen), title: fullTime(record.last_seen) });
+    if (record.how && record.status !== "disabled") seen.title += (seen.title ? " · " : "") + record.how;
+    const logon = node("td", { text: ago(record.last_logon), title: fullTime(record.last_logon) });
+    if (record.status === "domain") logon.className = "status-text s-domain";
+    rows.appendChild(node("tr", {},
+      node("td", {}, statusBadge(record.status)),
+      node("td", { text: record.name, title: record.host || "" }),
+      node("td", { text: record.address || "—", class: record.address ? "" : "dim" }),
+      node("td", { text: record.os || "", class: "dim" }),
+      node("td", { text: record.ou || "", class: "dim" }),
+      seen,
+      node("td", { text: ago(record.since), title: fullTime(record.since), class: "dim" }),
+      logon,
+      node("td", { text: record.description || "", class: "dim wrap" })));
+  }
+  $("empty").hidden = data.computers.length > 0;
+}
+
+function renderEvents() {
+  const list = $("events");
+  list.replaceChildren();
+  if (!data.events.length) {
+    list.appendChild(node("li", { class: "dim", text: "Пока ничего не менялось." }));
+    return;
+  }
+  for (const event of data.events.slice(0, 200)) {
+    const change = event.to
+      ? node("div", {}, event.from ? statusBadge(event.from) : null,
+             event.from ? document.createTextNode(" → ") : null, statusBadge(event.to))
+      : node("div", { class: "dim", text: event.note });
+    list.appendChild(node("li", {},
+      node("div", {}, node("b", { text: event.name }),
+           node("span", { class: "dim", text: " · " + ago(event.time), title: fullTime(event.time) })),
+      change));
+  }
+}
+
+$("search").addEventListener("input", () => data && renderTable());
+$("check").addEventListener("click", async () => {
+  $("check").disabled = true;
+  await fetch("/api/check", { method: "POST" });
+  setTimeout(load, 1000);
+});
+load();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
