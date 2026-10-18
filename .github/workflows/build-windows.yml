@@ -32,14 +32,14 @@ jobs:
       - name: Прогнать тесты
         run: python -m unittest discover -s tests
 
-      - name: Собрать NetVault.exe и NetMaster.exe
+      - name: Собрать программы
         run: python build.py
 
       # Оконная программа не задерживает консоль, поэтому ждём её явно
       # через Start-Process -Wait и смотрим код возврата.
       - name: Проверить собранные программы
         run: |
-          foreach ($app in "NetVault", "NetMaster") {
+          foreach ($app in "NetVault", "NetMaster", "NetMap", "NetWatch") {
             $exe = ".\dist\$app.exe"
             $run = Start-Process -FilePath $exe -ArgumentList "--selftest" -Wait -PassThru
             if ($run.ExitCode -ne 0) { throw "$app.exe не прошёл самопроверку" }
@@ -53,5 +53,7 @@ jobs:
           path: |
             dist/NetVault.exe
             dist/NetMaster.exe
+            dist/NetMap.exe
+            dist/NetWatch.exe
           if-no-files-found: error
           retention-days: 30
