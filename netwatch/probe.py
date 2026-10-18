@@ -12,7 +12,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from netwatch.directory import NO_WINDOW
+from netwatch.powershell import NO_WINDOW
 
 TCP_PORTS = (445, 135, 3389)
 TIMEOUT = 1.0

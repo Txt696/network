@@ -8,7 +8,9 @@ NetWatch — мониторинг компьютеров домена.
 
 Берёт компьютеры из Active Directory, постоянно проверяет, отвечают ли они,
 и показывает на веб-странице, кто на связи, кто не отвечает, кто пропал
-и у кого сломалась связь с доменом.
+и у кого сломалась связь с доменом. Вторая вкладка — журналы событий
+Windows с контроллеров домена: блокировки, неудачные входы, сломанное
+доверие, синие экраны — с пояснением, что каждое событие значит.
 """
 
 import argparse
@@ -31,7 +33,7 @@ def default_data_dir():
 
 def selftest():
     """Для собранного .exe: модули на месте и страница попала в сборку."""
-    from netwatch import monitor, probe, server  # noqa: F401
+    from netwatch import catalog, eventlogs, monitor, probe, server  # noqa: F401
     page = server.STATIC / "watch.html"
     print("Python %s" % sys.version.split()[0])
     print("  [%s] страница мониторинга — %s" % ("есть" if page.exists() else "НЕТ ", page))
@@ -70,6 +72,14 @@ def main(argv=None):
     parser.add_argument("--stale-days", type=float, default=45,
                         help="через сколько дней без входа в домен связь с доменом "
                              "считается потерянной (45)")
+    parser.add_argument("--event-hosts", default="dc", metavar="КТО",
+                        help="с кого собирать журналы событий: dc — контроллеры домена "
+                             "(по умолчанию), all — все компьютеры на связи, local — эта "
+                             "машина, или имена через запятую; none — не собирать")
+    parser.add_argument("--events-interval", type=int, default=300,
+                        help="пауза между сборами журналов, секунд (по умолчанию 300)")
+    parser.add_argument("--events-hours", type=float, default=24,
+                        help="за сколько часов брать события при первом запуске (24)")
     parser.add_argument("--host", default="127.0.0.1",
                         help="адрес страницы; 0.0.0.0 — открыть для других ПК в сети")
     parser.add_argument("--port", type=int, default=8770, help="порт (по умолчанию 8770)")
@@ -84,7 +94,7 @@ def main(argv=None):
     if args.selftest:
         return selftest()
 
-    from netwatch import directory
+    from netwatch import directory, eventlogs
     from netwatch.monitor import Monitor
     from netwatch.server import make_server
 
@@ -99,8 +109,15 @@ def main(argv=None):
         print_table(monitor.snapshot())
         return 1 if monitor.cycle.get("error") and not monitor.records else 0
 
+    collector = None
+    if args.event_hosts.strip().lower() != "none":
+        collector = eventlogs.EventCollector(
+            eventlogs.host_picker(monitor, args.event_hosts), data_dir / "eventlog.json",
+            interval=max(30, args.events_interval), hours=args.events_hours,
+            spec=args.event_hosts)
+
     try:
-        server = make_server(monitor, args.host, args.port)
+        server = make_server(monitor, args.host, args.port, collector)
     except OSError as exc:
         raise SystemExit("Не занять порт %d: %s" % (args.port, exc))
 
@@ -108,9 +125,14 @@ def main(argv=None):
     address = "http://%s:%d/" % (shown, server.server_address[1])
     print("Мониторинг: %s" % address)
     print("Источник: %s" % monitor.source)
+    print("Журналы событий: %s" % (args.event_hosts if collector else "не собираются"))
     print("Состояние: %s" % data_dir)
     print("Остановить: Ctrl+C")
     threading.Thread(target=monitor.run_forever, daemon=True).start()
+    if collector:
+        # Контроллеры домена известны только после первого чтения AD.
+        threading.Thread(target=lambda: monitor.first_pass.wait() and collector.run_forever(),
+                         daemon=True).start()
     if not args.no_browser:
         threading.Timer(0.5, webbrowser.open, args=(address,)).start()
     try:
@@ -119,6 +141,8 @@ def main(argv=None):
         print("\nОстановлено")
     finally:
         monitor.stop()
+        if collector:
+            collector.stop()
         server.server_close()
     return 0
 

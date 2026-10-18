@@ -72,6 +72,7 @@ class Monitor:
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
+        self.first_pass = threading.Event()  # список компьютеров уже прочитан
         self._load_state()
 
     # ------------------------------------------------------------ цикл
@@ -120,6 +121,7 @@ class Monitor:
                           "error": "%s: %s" % (type(exc).__name__, exc)}
         finally:
             self.busy = False
+            self.first_pass.set()
 
     # ------------------------------------------------------- обработка
     def _merge(self, computers, now):
@@ -137,7 +139,7 @@ class Monitor:
             record.update(name=computer.name, host=computer.host, os=computer.os,
                           ou=computer.ou, description=computer.description,
                           enabled=computer.enabled, last_logon=computer.last_logon,
-                          pwd_last_set=computer.pwd_last_set)
+                          pwd_last_set=computer.pwd_last_set, is_dc=computer.is_dc)
             fresh[key] = record
         for key, record in self.records.items():
             if key not in fresh:
@@ -170,6 +172,13 @@ class Monitor:
     def _event(self, now, name, old, new, note):
         self.events.append({"time": now, "name": name, "from": old, "to": new, "note": note})
         del self.events[:-MAX_EVENTS]
+
+    def hosts(self, dc_only=False, online_only=False):
+        """Адреса компьютеров для сбора журналов: контроллеры домена или все, кто на связи."""
+        with self._lock:
+            return [rec["host"] for rec in self.records.values()
+                    if rec.get("enabled") and (not dc_only or rec.get("is_dc"))
+                    and (not online_only or rec.get("online"))]
 
     # ------------------------------------------------------- состояние
     def snapshot(self):

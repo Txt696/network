@@ -337,7 +337,7 @@ class ServerTest(unittest.TestCase):
         status, body = self.request("GET", "/api/export.csv")
         self.assertEqual(status, 200)
         text = body.decode("utf-8")
-        self.assertTrue(text.startswith("﻿Компьютер;Статус;"))
+        self.assertTrue(text.startswith("\ufeffКомпьютер;Статус;"))
         self.assertIn("PC01;На связи;", text)
         self.assertIn("PC02;Пропал;", text)
 

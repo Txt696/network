@@ -10,6 +10,7 @@
     --text: #dbe2ea; --dim: #8a97a8; --accent: #569cd6;
     --online: #6acd82; --domain: #f4a261; --offline: #e9c46a;
     --lost: #f48771; --disabled: #6b7685;
+    --critical: #f48771; --error: #f4a261; --warning: #e9c46a; --info: #569cd6;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -18,7 +19,16 @@
            padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
   header .info { color: var(--dim); font-size: 13px; }
-  header .tools { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+  nav { display: flex; gap: 4px; }
+  nav a { color: var(--dim); text-decoration: none; padding: 6px 12px; border-radius: 4px;
+          border: 1px solid transparent; }
+  nav a:hover { color: var(--text); }
+  nav a.active { color: var(--text); background: #10141a; border-color: var(--line); }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 12px 16px 0; }
+  .toolbar .info { color: var(--dim); font-size: 13px; }
+  .toolbar .tools { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+  select { background: #10141a; color: var(--text); font: inherit; border: 1px solid var(--line);
+           border-radius: 4px; padding: 6px 8px; max-width: 100%; }
   input, button, .button { background: #10141a; color: var(--text); font: inherit;
          border: 1px solid var(--line); border-radius: 4px; padding: 6px 12px; }
   input { width: 260px; max-width: 100%; }
@@ -61,6 +71,31 @@
   aside li { padding: 6px 0; border-bottom: 1px solid var(--line); }
   aside li:last-child { border-bottom: 0; }
   .empty { padding: 24px; text-align: center; color: var(--dim); }
+  .v-critical { --c: var(--critical); } .v-error { --c: var(--error); }
+  .v-warning { --c: var(--warning); } .v-info { --c: var(--info); }
+  .views { display: flex; gap: 4px; padding: 12px 16px 0; }
+  .views button.active { border-color: var(--accent); background: #1f2a38; }
+  .pad { padding: 12px 16px 16px; }
+  #log-rows tr.event { cursor: pointer; }
+  #log-rows tr.event:hover td { background: #1f2733; }
+  #log-rows tr.open td { background: #1f2a38; }
+  .pairs span + span::before { content: " · "; color: var(--dim); }
+  .pairs i { font-style: normal; color: var(--dim); }
+  tr.detail td { white-space: normal; background: #161b23; padding: 10px 14px 14px; }
+  .explain { max-width: 980px; }
+  .explain p { margin: 4px 0 8px; }
+  .explain b { color: var(--dim); font-weight: 600; }
+  pre { white-space: pre-wrap; word-break: break-word; color: var(--dim); background: #10141a;
+        border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin: 6px 0 0;
+        max-height: 320px; overflow: auto; }
+  .ref h2 { font-size: 15px; margin: 18px 0 8px; }
+  .ref h2:first-child { margin-top: 0; }
+  .ref-item { background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+              padding: 10px 14px; margin-bottom: 8px; }
+  .ref-item .head { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+  .ref-item .code { font-weight: 600; min-width: 48px; }
+  .ref-item p { margin: 6px 0 0; }
+  .note { color: var(--dim); max-width: 980px; }
   @media (max-width: 900px) {
     main { flex-direction: column; align-items: stretch; }
     aside { width: 100%; max-height: none; }
@@ -70,13 +105,21 @@
 <body>
 <header>
   <h1>Мониторинг ПК в домене</h1>
+  <nav>
+    <a href="#computers" data-tab="computers">Компьютеры</a>
+    <a href="#events" data-tab="events">Журналы событий</a>
+  </nav>
+</header>
+
+<section id="tab-computers">
+<div class="toolbar">
   <span class="info" id="info">Загрузка…</span>
   <div class="tools">
     <input id="search" placeholder="Поиск: имя, IP, ОС, подразделение">
     <button id="check">Проверить сейчас</button>
     <a class="button" href="/api/export.csv">Скачать CSV</a>
   </div>
-</header>
+</div>
 <div class="error" id="error"></div>
 <div class="chips" id="chips"></div>
 <main>
@@ -88,10 +131,60 @@
     <div class="empty" id="empty" hidden>Компьютеров нет — список ещё не загружен.</div>
   </div>
   <aside>
-    <h2>События</h2>
+    <h2>Изменения статусов</h2>
     <ul id="events"></ul>
   </aside>
 </main>
+</section>
+
+<section id="tab-events" hidden>
+<div class="toolbar">
+  <span class="info" id="log-info">Загрузка…</span>
+  <div class="tools">
+    <input id="log-search" placeholder="Поиск: пользователь, компьютер, код">
+    <select id="log-host"><option value="">Все компьютеры</option></select>
+    <select id="log-period">
+      <option value="3600">За час</option>
+      <option value="86400" selected>За сутки</option>
+      <option value="604800">За неделю</option>
+      <option value="0">Всё хранимое</option>
+    </select>
+    <button id="collect">Собрать сейчас</button>
+    <a class="button" href="/api/eventlog.csv">Скачать CSV</a>
+  </div>
+</div>
+<div class="error" id="log-error"></div>
+<div class="chips" id="log-chips"></div>
+<div class="views">
+  <button data-view="list" class="active">События</button>
+  <button data-view="reference">Справочник: что значит каждое событие</button>
+  <button data-view="sources">Откуда собираются</button>
+</div>
+<div class="pad" id="view-list">
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Время</th><th>Важность</th><th>Компьютер</th><th>Код</th>
+                 <th>Что произошло</th><th>Подробности</th></tr></thead>
+      <tbody id="log-rows"></tbody>
+    </table>
+    <div class="empty" id="log-empty" hidden></div>
+  </div>
+</div>
+<div class="pad ref" id="view-reference" hidden></div>
+<div class="pad" id="view-sources" hidden>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Компьютер</th><th>Опрошен</th><th>Новых событий</th><th>Состояние</th></tr></thead>
+      <tbody id="source-rows"></tbody>
+    </table>
+  </div>
+  <p class="note">Журналы с других компьютеров читаются по сети. Учётной записи, от которой
+  запущен NetWatch, нужно быть в группе «Читатели журнала событий» (Event Log Readers) на
+  опрашиваемом компьютере — для контроллеров домена это доменная группа, — а в его брандмауэре
+  должно быть включено правило «Удалённое управление журналом событий». Журналы самой машины,
+  на которой стоит NetWatch, читаются без этого.</p>
+</div>
+</section>
 
 <script>
 const ORDER = ["online", "domain", "offline", "lost", "disabled"];
@@ -115,9 +208,9 @@ function node(tag, attrs = {}, ...children) {
   return element;
 }
 
-function ago(stamp) {
+function ago(stamp, now = data ? data.now : Date.now() / 1000) {
   if (!stamp) return "—";
-  const seconds = Math.max(0, data.now - stamp);
+  const seconds = Math.max(0, now - stamp);
   if (seconds < 90) return "только что";
   if (seconds < 3600) return Math.round(seconds / 60) + " мин назад";
   if (seconds < 86400 * 2) return Math.round(seconds / 3600) + " ч назад";
@@ -249,7 +342,208 @@ function renderEvents() {
   }
 }
 
+// ------------------------------------------------------- журналы событий
+const SEVERITY = ["critical", "error", "warning", "info"];
+const LOG_NAMES = { Security: "Журнал безопасности (Security)", System: "Системный журнал (System)" };
+const LOG_REFRESH_MS = 30000;
+let logs = null, reference = null, logLevel = "", logView = "list", openEvent = null;
+
+function severityBadge(level) {
+  const labels = (logs && logs.levels) || (reference && reference.levels) || {};
+  return node("span", { class: "status v-" + level },
+    node("span", { class: "dot" }), node("span", { class: "status-text", text: labels[level] || level }));
+}
+
+async function loadLogs() {
+  try {
+    const [response] = await Promise.all([fetch("/api/eventlog", { cache: "no-store" }), loadReference()]);
+    logs = await response.json();
+  } catch (error) {
+    $("log-error").textContent = "Нет связи с программой мониторинга: " + error.message;
+    return;
+  }
+  renderLogs();
+}
+
+async function loadReference() {
+  if (!reference) reference = await (await fetch("/api/eventlog/catalog")).json();
+}
+
+function renderLogs() {
+  if (!logs.enabled) {
+    $("log-info").textContent = "Сбор журналов выключен";
+    $("log-error").textContent = logs.error || "";
+    $("collect").disabled = true;
+    logs = Object.assign(logs, { events: [], sources: [], counts: {}, levels: reference.levels });
+  } else {
+    const cycle = logs.cycle || {};
+    const parts = [plural(logs.sources.length, "источник", "источника", "источников")];
+    if (logs.busy) parts.push("идёт сбор…");
+    else if (cycle.finished) parts.push("собрано " + ago(cycle.finished, logs.now));
+    $("log-info").textContent = parts.join(" · ");
+    $("log-info").title = `Сбор каждые ${logs.interval} с · откуда: ${logs.spec}`;
+    const failed = logs.sources.filter(source => Object.keys(source.errors || {}).length);
+    $("log-error").textContent = cycle.error ||
+      (failed.length ? `Не со всех компьютеров удалось прочитать журналы (${failed.length}) — ` +
+                       "подробности на вкладке «Откуда собираются»." : "");
+    $("collect").disabled = logs.busy;
+  }
+  renderHostFilter();
+  renderLogChips();
+  renderLogList();
+  renderReference();
+  renderSources();
+}
+
+function renderHostFilter() {
+  const select = $("log-host"), current = select.value;
+  const hosts = [...new Set(logs.sources.map(source => source.host)
+                            .concat(logs.events.map(event => event.host)))].sort();
+  select.replaceChildren(node("option", { value: "", text: "Все компьютеры" }),
+                         ...hosts.map(host => node("option", { value: host, text: host })));
+  select.value = hosts.includes(current) ? current : "";
+}
+
+function renderLogChips() {
+  const chips = $("log-chips");
+  chips.replaceChildren();
+  for (const level of SEVERITY) {
+    const chip = node("div", { class: `chip v-${level}` + (logLevel === level ? " active" : ""),
+                               title: "за последние сутки" },
+      node("b", { class: "status-text", text: (logs.counts || {})[level] || 0 }),
+      node("span", { text: logs.levels[level] }));
+    chip.onclick = () => { logLevel = logLevel === level ? "" : level; renderLogChips(); renderLogList(); };
+    chips.appendChild(chip);
+  }
+}
+
+function summaryNode(summary) {
+  if (!Array.isArray(summary)) return node("span", { text: summary || "" });
+  return node("span", { class: "pairs" }, ...summary.map(([label, value]) =>
+    node("span", {}, node("i", { text: label + ": " }), document.createTextNode(value))));
+}
+
+function eventSearchText(event) {
+  const summary = Array.isArray(event.summary) ? event.summary.flat().join(" ") : event.summary;
+  return [event.host, event.id, event.log, event.title, summary].join(" ").toLowerCase();
+}
+
+function renderLogList() {
+  const query = $("log-search").value.trim().toLowerCase();
+  const host = $("log-host").value, period = Number($("log-period").value);
+  const events = logs.events
+    .filter(event => !logLevel || event.severity === logLevel)
+    .filter(event => !host || event.host === host)
+    .filter(event => !period || logs.now - event.time <= period)
+    .filter(event => !query || eventSearchText(event).includes(query));
+
+  const rows = $("log-rows");
+  rows.replaceChildren();
+  for (const event of events) {
+    const open = openEvent === event.key;
+    const row = node("tr", { class: "event" + (open ? " open" : "") },
+      node("td", { text: ago(event.time, logs.now), title: fullTime(event.time) }),
+      node("td", {}, severityBadge(event.severity)),
+      node("td", { text: event.host }),
+      node("td", { text: event.id, title: `${event.log} · ${event.provider}` }),
+      node("td", { text: event.title }),
+      node("td", { class: "wrap" }, summaryNode(event.summary)));
+    row.onclick = () => { openEvent = open ? null : event.key; renderLogList(); };
+    rows.appendChild(row);
+    if (open) rows.appendChild(node("tr", { class: "detail" }, node("td", { colspan: 6 },
+      node("div", { class: "explain" },
+        node("p", {}, node("b", { text: "Что произошло. " }),
+             document.createTextNode(event.meaning || "Описания для этого события нет.")),
+        event.action ? node("p", {}, node("b", { text: "Что делать. " }),
+                            document.createTextNode(event.action)) : null,
+        node("div", { class: "dim", text: `${fullTime(event.time)} · ${event.log} · ` +
+                                         `${event.provider} · событие ${event.id}` }),
+        event.message ? node("pre", { text: event.message }) : null))));
+  }
+  const empty = $("log-empty");
+  empty.hidden = events.length > 0;
+  empty.textContent = logs.events.length
+    ? "Под фильтр ничего не попало." : "Событий пока нет — в журналах тихо или сбор ещё не прошёл.";
+}
+
+function renderReference() {
+  const box = $("view-reference");
+  box.replaceChildren(node("p", { class: "note", text:
+    "NetWatch собирает только эти события — остальное в журналах Windows шум. " +
+    "Тот же текст открывается по щелчку на событии во вкладке «События»." }));
+  const query = $("log-search").value.trim().toLowerCase();
+  const seen = {};
+  for (const event of logs.events) seen[event.log + event.id] = (seen[event.log + event.id] || 0) + 1;
+  for (const log of ["Security", "System"]) {
+    const items = reference.events.filter(item => item.log === log).filter(item => !query ||
+      [item.id, item.title, item.meaning, item.action].join(" ").toLowerCase().includes(query));
+    if (!items.length) continue;
+    box.appendChild(node("h2", { text: LOG_NAMES[log] }));
+    for (const item of items) {
+      const count = seen[item.log + item.id];
+      box.appendChild(node("div", { class: "ref-item" },
+        node("div", { class: "head" },
+          node("span", { class: "code", text: item.id }), severityBadge(item.severity),
+          node("b", { text: item.title }),
+          node("span", { class: "dim", text: item.provider + (count ? ` · собрано: ${count}` : "") })),
+        node("p", { text: item.meaning }),
+        node("p", { class: "dim", text: "Что делать: " + item.action })));
+    }
+  }
+}
+
+function renderSources() {
+  const rows = $("source-rows");
+  rows.replaceChildren();
+  if (!logs.sources.length) {
+    rows.appendChild(node("tr", {}, node("td", { colspan: 4, class: "dim",
+      text: "Ещё ни с кого не собирали." })));
+    return;
+  }
+  for (const source of logs.sources) {
+    const errors = Object.entries(source.errors || {});
+    const state = errors.length
+      ? node("td", { class: "wrap status-text v-critical",
+                     text: errors.map(([log, text]) => (log === "*" ? "" : log + ": ") + text).join(" · ") })
+      : node("td", { class: "status-text s-online", text: "читается" });
+    rows.appendChild(node("tr", {},
+      node("td", { text: source.host }),
+      node("td", { text: ago(source.checked, logs.now), title: fullTime(source.checked) }),
+      node("td", { text: source.added || 0 }), state));
+  }
+}
+
+function showView(view) {
+  logView = view;
+  for (const button of document.querySelectorAll(".views button"))
+    button.classList.toggle("active", button.dataset.view === view);
+  for (const name of ["list", "reference", "sources"]) $("view-" + name).hidden = name !== view;
+}
+
+// ------------------------------------------------------------- вкладки
+function showTab() {
+  const tab = location.hash === "#events" ? "events" : "computers";
+  for (const link of document.querySelectorAll("nav a"))
+    link.classList.toggle("active", link.dataset.tab === tab);
+  $("tab-computers").hidden = tab !== "computers";
+  $("tab-events").hidden = tab !== "events";
+  if (tab === "events") loadLogs();
+}
+
 $("search").addEventListener("input", () => data && renderTable());
+$("log-search").addEventListener("input", () => { if (logs) { renderLogList(); renderReference(); } });
+$("log-host").addEventListener("change", () => logs && renderLogList());
+$("log-period").addEventListener("change", () => logs && renderLogList());
+for (const button of document.querySelectorAll(".views button"))
+  button.addEventListener("click", () => showView(button.dataset.view));
+$("collect").addEventListener("click", async () => {
+  $("collect").disabled = true;
+  await fetch("/api/eventlog/collect", { method: "POST" });
+  setTimeout(loadLogs, 1500);
+});
+window.addEventListener("hashchange", showTab);
+setInterval(() => { if (!$("tab-events").hidden) loadLogs(); }, LOG_REFRESH_MS);
+showTab();
 $("check").addEventListener("click", async () => {
   $("check").disabled = true;
   await fetch("/api/check", { method: "POST" });
