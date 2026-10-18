@@ -8,8 +8,6 @@ Windows, вошедшей в домен, без RSAT и без модуля Acti
 учётная запись самого компьютера).
 """
 
-import base64
-import json
 import re
 import subprocess
 import sys
@@ -17,29 +15,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from netwatch import powershell
+
 FILETIME_EPOCH = 11644473600  # секунд между 1601-01-01 и 1970-01-01
 FILETIME_NEVER = 0x7FFFFFFFFFFFFFFF
 ACCOUNTDISABLE = 0x2  # бит userAccountControl «учётная запись отключена»
+SERVER_TRUST_ACCOUNT = 0x2000  # бит userAccountControl «контроллер домена»
 AD_TIMEOUT = 180
-
-# Без этого флага собранная программа мигала бы чёрным окном консоли
-# на каждый вызов PowerShell и ping.
-NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 AD_FIELDS = ("name", "dnshostname", "operatingsystem", "useraccountcontrol",
              "lastlogontimestamp", "pwdlastset", "distinguishedname", "description")
 
-# Ответ отдаётся одной строкой base64: так ни кодировка консоли (cp866),
-# ни CLIXML, которым PowerShell иногда оборачивает вывод, его не испортят.
 AD_SCRIPT = r"""
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-function Say($prefix, $text) {
-  [Console]::Out.WriteLine($prefix + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($text)))
-}
-try {
   $searcher = [adsisearcher]'(objectCategory=computer)'
-  $base = '__BASE__'
+  $base = __BASE__
   if ($base) { $searcher.SearchRoot = [adsi]('LDAP://' + $base) }
   $searcher.PageSize = 1000
   foreach ($field in '__FIELDS__'.Split(',')) { [void]$searcher.PropertiesToLoad.Add($field) }
@@ -52,11 +41,10 @@ try {
     $row
   }
   Say 'OK:' (ConvertTo-Json -InputObject @($rows) -Compress)
-} catch {
-  Say 'ERR:' $_.Exception.Message
-  exit 1
-}
 """
+
+NO_POWERSHELL = ("PowerShell не найден. Список из Active Directory читается на Windows-машине "
+                 "в домене; на этой системе укажите список компьютеров файлом: --computers ФАЙЛ")
 
 
 class DirectoryError(Exception):
@@ -73,6 +61,7 @@ class Computer:
     enabled: bool = True
     last_logon: Optional[float] = None    # lastLogonTimestamp, unix-время
     pwd_last_set: Optional[float] = None  # когда ПК последний раз менял пароль в домене
+    is_dc: bool = False                   # контроллер домена — с него собираются журналы
 
     def __post_init__(self):
         self.host = self.host or self.name
@@ -81,33 +70,26 @@ class Computer:
 # ----------------------------------------------------------------- AD
 def from_active_directory(base="", run=subprocess.run):
     """Компьютеры из AD. base — DN подразделения, если нужен не весь домен."""
-    script = (AD_SCRIPT.replace("__BASE__", base.replace("'", "''"))
-              .replace("__FIELDS__", ",".join(AD_FIELDS)))
-    command = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-               "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")]
+    body = (AD_SCRIPT.replace("__BASE__", powershell.quote(base))
+            .replace("__FIELDS__", ",".join(AD_FIELDS)))
     try:
-        result = run(command, capture_output=True, timeout=AD_TIMEOUT, creationflags=NO_WINDOW)
-    except FileNotFoundError:
-        raise DirectoryError(
-            "PowerShell не найден. Список из Active Directory читается на Windows-машине "
-            "в домене; на этой системе укажите список компьютеров файлом: --computers ФАЙЛ")
-    except subprocess.TimeoutExpired:
-        raise DirectoryError("AD не ответил за %d с" % AD_TIMEOUT)
-    return parse_ad_output(result.stdout)
+        rows = powershell.run(body, AD_TIMEOUT, run=run)
+    except powershell.NoPowerShell:
+        raise DirectoryError(NO_POWERSHELL)
+    except powershell.PowerShellError as exc:
+        raise DirectoryError("Ошибка запроса к AD: %s" % exc)
+    return computers_from_rows(rows)
 
 
 def parse_ad_output(stdout):
-    lines = [line.strip() for line in stdout.decode("ascii", "replace").splitlines()]
-    answer = next((line for line in reversed(lines) if line[:3] in ("OK:", "ERR")), "")
-    if not answer:
-        raise DirectoryError("PowerShell ничего не вернул")
     try:
-        text = base64.b64decode(answer.split(":", 1)[1]).decode("utf-8", "replace")
-        if answer.startswith("ERR"):
-            raise DirectoryError("Ошибка запроса к AD: %s" % text.strip())
-        rows = json.loads(text)
-    except ValueError as exc:  # обрезанный base64 или JSON
-        raise DirectoryError("Непонятный ответ PowerShell: %s" % exc)
+        rows = powershell.unpack(stdout)
+    except powershell.PowerShellError as exc:
+        raise DirectoryError("Ошибка запроса к AD: %s" % exc)
+    return computers_from_rows(rows)
+
+
+def computers_from_rows(rows):
     rows = [rows] if isinstance(rows, dict) else rows
     return [computer_from_ad(row) for row in rows if isinstance(row, dict) and row.get("name")]
 
@@ -123,6 +105,7 @@ def computer_from_ad(row):
         enabled=not flags & ACCOUNTDISABLE,
         last_logon=filetime(row.get("lastlogontimestamp")),
         pwd_last_set=filetime(row.get("pwdlastset")),
+        is_dc=bool(flags & SERVER_TRUST_ACCOUNT),
     )
 
 
