@@ -22,11 +22,12 @@ DEFAULT_PORT = 8770
 MAX_EXPORT = 100000  # в CSV — все хранимые события, а не только показанные
 NO_EVENTS = "Сбор журналов выключен (--event-hosts none)."
 
-CSV_COLUMNS = (("Компьютер", "name"), ("Статус", "status"), ("IP", "address"),
+CSV_COLUMNS = (("Компьютер", "name"), ("Пользователь", "user"),
+               ("Вход пользователя", "user_time"), ("Статус", "status"), ("IP", "address"),
                ("ОС", "os"), ("Подразделение", "ou"), ("Последний ответ", "last_seen"),
                ("Вход в домен", "last_logon"), ("В статусе с", "since"),
                ("Описание", "description"))
-TIME_FIELDS = ("last_seen", "last_logon", "since")
+TIME_FIELDS = ("last_seen", "last_logon", "since", "user_time")
 
 
 def local_time(stamp):
@@ -83,9 +84,9 @@ class WatchHandler(BaseHTTPRequestHandler):
         if path == "/favicon.ico":
             return self._send(204, "image/x-icon", b"")
         if path == "/api/status":
-            return self._json(self.monitor.snapshot())
+            return self._json(self._status())
         if path == "/api/export.csv":
-            return self._csv("netwatch.csv", export_csv(self.monitor.snapshot()))
+            return self._csv("netwatch.csv", export_csv(self._status()))
         if path == "/api/eventlog":
             return self._json(self.collector.snapshot() if self.collector
                               else {"enabled": False, "error": NO_EVENTS})
@@ -105,6 +106,13 @@ class WatchHandler(BaseHTTPRequestHandler):
             self.collector.collect_now()
             return self._send(202, "application/json; charset=utf-8", b'{"ok": true}')
         self._error(404, "Нет такой страницы")
+
+    def _status(self):
+        """Таблица компьютеров; кто входил последним — из журналов контроллеров домена."""
+        snapshot = self.monitor.snapshot()
+        if self.collector:
+            self.collector.annotate(snapshot["computers"])
+        return snapshot
 
     # ------------------------------------------------------------- ответы
     def _json(self, payload):

@@ -337,9 +337,9 @@ class ServerTest(unittest.TestCase):
         status, body = self.request("GET", "/api/export.csv")
         self.assertEqual(status, 200)
         text = body.decode("utf-8")
-        self.assertTrue(text.startswith("\ufeffКомпьютер;Статус;"))
-        self.assertIn("PC01;На связи;", text)
-        self.assertIn("PC02;Пропал;", text)
+        self.assertTrue(text.startswith("\ufeffКомпьютер;Пользователь;Вход пользователя;Статус;"))
+        self.assertIn("PC01;;;На связи;", text)  # без журналов DC пользователь неизвестен
+        self.assertIn("PC02;;;Пропал;", text)
 
     def test_check_now(self):
         status, _ = self.request("POST", "/api/check")

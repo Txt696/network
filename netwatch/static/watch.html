@@ -189,11 +189,15 @@
 <script>
 const ORDER = ["online", "domain", "offline", "lost", "disabled"];
 const COLUMNS = [
-  ["status", "Статус"], ["name", "Компьютер"], ["address", "IP"], ["os", "ОС"],
+  ["status", "Статус"], ["name", "Компьютер"], ["user", "Пользователь"], ["address", "IP"], ["os", "ОС"],
   ["ou", "Подразделение"], ["last_seen", "Последний ответ"], ["since", "В статусе"],
   ["last_logon", "Вход в домен"], ["description", "Описание"],
 ];
 const REFRESH_MS = 10000;
+const COLUMN_HINTS = {
+  user: "Кто последним входил в домен с этого компьютера — по журналу безопасности " +
+        "контроллера домена (событие 4768). Наведите на имя — будут видны и предыдущие.",
+};
 let data = null, filterStatus = "", sortKey = "status", sortUp = true;
 
 const $ = id => document.getElementById(id);
@@ -286,7 +290,8 @@ function renderTable() {
   const head = $("head");
   head.replaceChildren();
   for (const [key, title] of COLUMNS) {
-    const th = node("th", { text: title, class: key === sortKey ? "sorted" + (sortUp ? " up" : "") : "" });
+    const th = node("th", { text: title, class: key === sortKey ? "sorted" + (sortUp ? " up" : "") : "",
+                            title: COLUMN_HINTS[key] || "" });
     th.onclick = () => { sortUp = key === sortKey ? !sortUp : true; sortKey = key; renderTable(); };
     head.appendChild(th);
   }
@@ -295,7 +300,8 @@ function renderTable() {
   const records = data.computers
     .filter(record => !filterStatus || record.status === filterStatus)
     .filter(record => !query || [record.name, record.address, record.os, record.ou,
-      record.description, record.host].join(" ").toLowerCase().includes(query))
+      record.description, record.host, ...(record.users || []).map(u => u.user)]
+      .join(" ").toLowerCase().includes(query))
     .sort((a, b) => {
       const x = sortValue(a, sortKey), y = sortValue(b, sortKey);
       const order = x < y ? -1 : x > y ? 1 : a.name.localeCompare(b.name);
@@ -312,6 +318,7 @@ function renderTable() {
     rows.appendChild(node("tr", {},
       node("td", {}, statusBadge(record.status)),
       node("td", { text: record.name, title: record.host || "" }),
+      userCell(record),
       node("td", { text: record.address || "—", class: record.address ? "" : "dim" }),
       node("td", { text: record.os || "", class: "dim" }),
       node("td", { text: record.ou || "", class: "dim" }),
@@ -321,6 +328,18 @@ function renderTable() {
       node("td", { text: record.description || "", class: "dim wrap" })));
   }
   $("empty").hidden = data.computers.length > 0;
+}
+
+function userCell(record) {
+  if (!record.user)
+    return node("td", { text: "—", class: "dim",
+                        title: "Входов с этого компьютера в журналах контроллеров домена не найдено" });
+  const history = (record.users || []).map(entry =>
+    `${entry.domain ? entry.domain + "\\" : ""}${entry.user} — ${fullTime(entry.time)}` +
+    (entry.address ? ` (${entry.address})` : "")).join("\n");
+  return node("td", { title: "Последние входы:\n" + history },
+    node("span", { text: record.user }),
+    node("span", { class: "dim", text: " · " + ago(record.user_time) }));
 }
 
 function renderEvents() {
