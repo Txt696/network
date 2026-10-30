@@ -114,7 +114,7 @@ def main(argv=None):
         collector = eventlogs.EventCollector(
             eventlogs.host_picker(monitor, args.event_hosts), data_dir / "eventlog.json",
             interval=max(30, args.events_interval), hours=args.events_hours,
-            spec=args.event_hosts)
+            spec=args.event_hosts, address_book=monitor.address_book)
 
     try:
         server = make_server(monitor, args.host, args.port, collector)

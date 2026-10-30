@@ -180,6 +180,16 @@ class Monitor:
                     if rec.get("enabled") and (not dc_only or rec.get("is_dc"))
                     and (not online_only or rec.get("online"))]
 
+    def address_book(self):
+        """IP, DNS-имя и имя компьютера → имя в таблице: по нему входы привязываются к ПК."""
+        with self._lock:
+            book = {}
+            for record in self.records.values():
+                for value in (record.get("name"), record.get("host"), record.get("address")):
+                    if value:
+                        book[value.lower()] = record["name"]
+            return book
+
     # ------------------------------------------------------- состояние
     def snapshot(self):
         """Всё, что нужно странице: компьютеры, счётчики, события."""

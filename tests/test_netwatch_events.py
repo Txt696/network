@@ -147,7 +147,7 @@ class FetchTest(unittest.TestCase):
 
     def test_remote_fetch(self):
         run, calls = self.fake_run({"events": [event(5, 4740)], "errors": {"Security": "нет"}})
-        since = {log: NOW - 3600 for log in catalog.LOGS}
+        since = {log: NOW - 3600 for log in catalog.QUERIES}
         events, errors = eventlogs.fetch("dc01.corp.local", since, run=run)
         self.assertEqual([e["id"] for e in events], [4740])
         self.assertEqual(errors, {"Security": "нет"})
@@ -159,12 +159,12 @@ class FetchTest(unittest.TestCase):
 
     def test_local_fetch_has_no_computer_name(self):
         run, calls = self.fake_run({"events": [], "errors": {}})
-        eventlogs.fetch("DC01", {log: NOW for log in catalog.LOGS}, local=True, run=run)
+        eventlogs.fetch("DC01", {log: NOW for log in catalog.QUERIES}, local=True, run=run)
         self.assertIn("$computer = ''", calls[0])
 
     def test_single_event_object(self):
         run, _ = self.fake_run({"events": event(1, 4740), "errors": {}})
-        events, _ = eventlogs.fetch("dc", {log: NOW for log in catalog.LOGS}, run=run)
+        events, _ = eventlogs.fetch("dc", {log: NOW for log in catalog.QUERIES}, run=run)
         self.assertEqual(len(events), 1)
 
     def test_no_powershell(self):
@@ -172,7 +172,7 @@ class FetchTest(unittest.TestCase):
             raise FileNotFoundError("powershell")
 
         with self.assertRaises(EventLogError) as caught:
-            eventlogs.fetch("dc", {log: NOW for log in catalog.LOGS}, run=missing)
+            eventlogs.fetch("dc", {log: NOW for log in catalog.QUERIES}, run=missing)
         self.assertIn("Windows", str(caught.exception))
 
     def test_is_local(self):
@@ -349,6 +349,135 @@ class EventServerTest(unittest.TestCase):
     def test_page_has_events_tab(self):
         _status, body = self.request("GET", "/")
         self.assertIn("Журналы событий", body.decode("utf-8"))
+
+
+
+def logon(record, user, address, ago=60, domain="CORP"):
+    return dict(event(record, 4768, {"TargetUserName": user, "TargetDomainName": domain,
+                                     "IpAddress": address}, ago=ago), query=catalog.LOGONS)
+
+
+class LastUserTest(unittest.TestCase):
+    """Столбец «Пользователь»: кто входил на компьютер, по событию 4768 на DC."""
+
+    BOOK = {"pc01": "PC01", "pc01.corp.local": "PC01", "10.1.0.57": "PC01",
+            "10.1.0.80": "PC02", "dc01.corp.local": "DC01"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.remote = []
+        self.collector = EventCollector(
+            lambda: ["dc01.corp.local"], Path(self.tmp.name) / "eventlog.json",
+            fetch=lambda host, since, local=False: (list(self.remote), {}),
+            clock=lambda: NOW, address_book=lambda: dict(self.BOOK))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def users(self, name):
+        rows = self.collector.annotate([{"name": name}])
+        return rows[0]
+
+    def test_query_takes_only_successful_logons(self):
+        text = catalog.logons_xml("2026-10-18T10:00:00.000Z")
+        select = ElementTree.fromstring(text).find("./Query/Select")
+        self.assertEqual(select.get("Path"), "Security")
+        self.assertIn("EventID=4768", select.text)
+        self.assertIn("band(Keywords,%d)" % catalog.AUDIT_SUCCESS, select.text)
+
+    def test_logons_are_a_separate_query(self):
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(base64.b64decode(command[-1]).decode("utf-16-le"))
+            return subprocess.CompletedProcess(command, 0,
+                                               powershell_answer({"events": [], "errors": {}}), b"")
+
+        eventlogs.fetch("dc01", {name: NOW for name in catalog.QUERIES}, run=run)
+        self.assertIn("log = 'Logons'", calls[0])
+        self.assertIn("max = %d; message = $false" % eventlogs.MAX_LOGONS, calls[0])
+        self.assertIn("max = %d; message = $true" % eventlogs.MAX_PER_LOG, calls[0])
+
+    def test_last_user_by_address(self):
+        self.remote = [logon(1, "ivanova", "::ffff:10.1.0.57", ago=600),
+                       logon(2, "petrov", "::ffff:10.1.0.80", ago=300)]
+        self.collector.run_once()
+        pc01 = self.users("PC01")
+        self.assertEqual(pc01["user"], "ivanova")
+        self.assertEqual(pc01["user_time"], NOW - 600)
+        self.assertEqual(self.users("PC02")["user"], "petrov")
+        # Входы — не события для списка: их тысячи в день.
+        self.assertEqual(self.collector.snapshot()["events"], [])
+
+    def test_newest_wins_whatever_the_order(self):
+        # Get-WinEvent отдаёт новые первыми.
+        self.remote = [logon(3, "petrov", "10.1.0.57", ago=60),
+                       logon(2, "ivanova", "10.1.0.57", ago=600),
+                       logon(1, "petrov", "10.1.0.57", ago=3600)]
+        self.collector.run_once()
+        row = self.users("PC01")
+        self.assertEqual(row["user"], "petrov")
+        self.assertEqual([(u["user"], u["time"]) for u in row["users"]],
+                         [("petrov", NOW - 60), ("ivanova", NOW - 600)])
+
+    def test_keeps_only_recent_users(self):
+        self.remote = [logon(i, "user%d" % i, "10.1.0.57", ago=1000 - i) for i in range(8)]
+        self.collector.run_once()
+        names = [u["user"] for u in self.users("PC01")["users"]]
+        self.assertEqual(names, ["user7", "user6", "user5", "user4", "user3"])
+
+    def test_computer_accounts_and_unknown_addresses_skipped(self):
+        self.remote = [logon(1, "PC01$", "10.1.0.57", ago=10),
+                       logon(2, "krbtgt", "10.1.0.57", ago=20),
+                       logon(3, "guest", "10.9.9.9", ago=30),
+                       logon(4, "ivanova", "10.1.0.57", ago=40)]
+        self.collector.run_once()
+        self.assertEqual(self.users("PC01")["user"], "ivanova")
+        self.assertEqual(len(self.users("PC01")["users"]), 1)
+
+    def test_logon_on_the_dc_itself(self):
+        self.remote = [logon(1, "admin", "::1")]
+        self.collector.run_once()
+        self.assertEqual(self.users("DC01")["user"], "admin")
+
+    def test_unknown_computer_has_no_user(self):
+        row = self.users("NOBODY")
+        self.assertEqual((row["user"], row["user_time"], row["users"]), ("", None, []))
+
+    def test_mark_and_restart(self):
+        self.remote = [logon(1, "ivanova", "10.1.0.57", ago=120)]
+        self.collector.run_once()
+        self.assertEqual(self.collector.marks["dc01.corp.local|Logons"], NOW - 120)
+        again = EventCollector(lambda: [], Path(self.tmp.name) / "eventlog.json",
+                               fetch=lambda host, since, local=False: ([], {}),
+                               clock=lambda: NOW)
+        self.assertEqual(again.annotate([{"name": "PC01"}])[0]["user"], "ivanova")
+
+    def test_status_page_shows_user(self):
+        monitor = Monitor(lambda: [Computer("PC01", "pc01.corp.local")],
+                          Path(self.tmp.name) / "state.json",
+                          probe=lambda host: Result(True, "10.1.0.57", "TCP 445"),
+                          clock=lambda: NOW)
+        monitor.run_once()
+        self.assertEqual(monitor.address_book()["10.1.0.57"], "PC01")
+        self.remote = [logon(1, "ivanova", "::ffff:10.1.0.57")]
+        self.collector.address_book = monitor.address_book
+        self.collector.run_once()
+        server = make_server(monitor, port=0, collector=self.collector)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_address[1],
+                                                    timeout=5)
+            connection.request("GET", "/api/status")
+            payload = json.loads(connection.getresponse().read())
+            connection.request("GET", "/api/export.csv")
+            text = connection.getresponse().read().decode("utf-8")
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertEqual(payload["computers"][0]["user"], "ivanova")
+        self.assertIn("PC01;ivanova;", text)
 
 
 if __name__ == "__main__":

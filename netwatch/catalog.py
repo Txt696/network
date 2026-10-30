@@ -22,6 +22,7 @@ GPO = "Microsoft-Windows-GroupPolicy"
 SCM = "Service Control Manager"
 
 AUDIT_FAILURE = 4503599627370496  # бит Keywords «аудит отказа»
+AUDIT_SUCCESS = 9007199254740992  # бит Keywords «аудит успеха»
 MAX_IDS_PER_QUERY = 20  # журнал Windows не принимает в одном запросе слишком много условий
 
 
@@ -327,6 +328,12 @@ CATALOG = (
 BY_KEY = {info.key: info for info in CATALOG}
 LOGS = (SYSTEM, SECURITY)
 
+# Отдельный запрос «кто входил»: при входе в домен контроллер выдаёт билет
+# Kerberos (событие 4768) и пишет имя пользователя и IP компьютера. В список
+# событий это не идёт — их тысячи в день, — а только в столбец «Пользователь».
+LOGONS = "Logons"
+QUERIES = LOGS + (LOGONS,)
+
 
 def lookup(log, provider, event_id):
     return BY_KEY.get((log, (provider or "").lower(), int(event_id)))
@@ -353,6 +360,17 @@ def query_xml(log, since_iso):
                      % (provider, condition, since_iso))
             selects.append('<Select Path="%s">%s</Select>' % (log, escape(xpath)))
     return '<QueryList><Query Id="0" Path="%s">%s</Query></QueryList>' % (log, "".join(selects))
+
+
+def logons_xml(since_iso):
+    xpath = ("*[System[Provider[@Name='%s'] and EventID=4768 and band(Keywords,%d) "
+             "and TimeCreated[@SystemTime>='%s']]]" % (AUDIT, AUDIT_SUCCESS, since_iso))
+    return ('<QueryList><Query Id="0" Path="%s"><Select Path="%s">%s</Select></Query></QueryList>'
+            % (SECURITY, SECURITY, escape(xpath)))
+
+
+def query_for(name, since_iso):
+    return logons_xml(since_iso) if name == LOGONS else query_xml(name, since_iso)
 
 
 # ---------------------------------------------------------------- описание

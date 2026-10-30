@@ -25,6 +25,8 @@ from netwatch import catalog, powershell
 
 FETCH_TIMEOUT = 180
 MAX_PER_LOG = 500     # столько событий одного журнала за раз, не больше
+MAX_LOGONS = 5000     # входов за раз: их много, а нужны только последние
+RECENT_USERS = 5      # сколько последних пользователей помнить на компьютер
 MAX_STORED = 5000
 MAX_MESSAGE = 2000
 WORKERS = 8           # одновременно опрашиваемых компьютеров
@@ -35,7 +37,7 @@ FETCH_SCRIPT = r"""
   $rows = New-Object System.Collections.ArrayList
   $errors = @{}
   foreach ($q in $queries) {
-    $params = @{ FilterXml = [xml]$q.xml; MaxEvents = __MAX__; ErrorAction = 'Stop' }
+    $params = @{ FilterXml = [xml]$q.xml; MaxEvents = $q.max; ErrorAction = 'Stop' }
     if ($computer) { $params.ComputerName = $computer }
     try { $events = @(Get-WinEvent @params) }
     catch {
@@ -58,10 +60,10 @@ FETCH_SCRIPT = r"""
         }
       }
       $message = ''
-      try { $message = [string]$e.Message } catch {}
+      if ($q.message) { try { $message = [string]$e.Message } catch {} }
       if ($message.Length -gt __MAX_MESSAGE__) { $message = $message.Substring(0, __MAX_MESSAGE__) }
       [void]$rows.Add(@{
-        log = $e.LogName; provider = $e.ProviderName; id = $e.Id; record = $e.RecordId
+        query = $q.log; log = $e.LogName; provider = $e.ProviderName; id = $e.Id; record = $e.RecordId
         level = [int]$e.Level; data = $data; message = $message
         time = ([DateTimeOffset]$e.TimeCreated).ToUnixTimeMilliseconds() / 1000.0
       })
@@ -82,14 +84,18 @@ def iso_utc(stamp):
 def fetch(host, since, local=False, run=subprocess.run):
     """
     События из справочника с одного компьютера.
-    since — {журнал: unix-время}, с какого момента брать.
-    Возвращает (события, {журнал: ошибка}).
+    since — {запрос: unix-время}, с какого момента брать; запросы — журналы
+    System и Security и отдельный запрос входов пользователей (catalog.LOGONS).
+    Возвращает (события, {запрос: ошибка}).
     """
-    queries = ", ".join("@{ log = %s; xml = %s }" % (powershell.quote(log), powershell.quote(
-        catalog.query_xml(log, iso_utc(since[log])))) for log in catalog.LOGS)
+    queries = ", ".join(
+        "@{ log = %s; xml = %s; max = %d; message = $%s }" % (
+            powershell.quote(name), powershell.quote(catalog.query_for(name, iso_utc(since[name]))),
+            MAX_LOGONS if name == catalog.LOGONS else MAX_PER_LOG,
+            "false" if name == catalog.LOGONS else "true")
+        for name in catalog.QUERIES)
     body = (FETCH_SCRIPT.replace("__HOST__", powershell.quote("" if local else host))
-            .replace("__QUERIES__", queries).replace("__MAX__", str(MAX_PER_LOG))
-            .replace("__MAX_MESSAGE__", str(MAX_MESSAGE)))
+            .replace("__QUERIES__", queries).replace("__MAX_MESSAGE__", str(MAX_MESSAGE)))
     try:
         answer = powershell.run(body, FETCH_TIMEOUT, run=run)
     except powershell.NoPowerShell:
@@ -138,8 +144,9 @@ def host_picker(monitor, spec):
 
 class EventCollector:
     def __init__(self, hosts, state_path, interval=300, hours=24, fetch=fetch,
-                 workers=WORKERS, clock=time.time, spec=""):
+                 workers=WORKERS, clock=time.time, spec="", address_book=dict):
         self.hosts = hosts
+        self.address_book = address_book  # адрес или имя → имя компьютера в таблице
         self.state_path = Path(state_path)
         self.interval = interval
         self.window = hours * 3600
@@ -150,6 +157,7 @@ class EventCollector:
         self.events = []
         self.marks = {}     # «компьютер|журнал» → время последнего события
         self.sources = {}   # компьютер → когда опрошен, сколько нового, ошибки
+        self.logons = {}    # имя компьютера → последние вошедшие пользователи
         self.cycle = {}
         self.busy = False
         self._lock = threading.Lock()
@@ -176,11 +184,12 @@ class EventCollector:
         self.busy = True
         try:
             hosts = self.hosts()
+            book = self.address_book()
             with ThreadPoolExecutor(max_workers=self.workers) as pool:
                 results = list(pool.map(lambda host: (host, self._fetch_one(host, started)), hosts))
             with self._lock:
                 for host, (events, errors) in results:
-                    added = self._store(host, events)
+                    added = self._store(host, events, book)
                     self.sources[host] = {"checked": self.clock(), "added": added,
                                           "errors": errors}
                 self.events.sort(key=lambda event: event["time"])
@@ -199,19 +208,23 @@ class EventCollector:
 
     def _fetch_one(self, host, now):
         since = {log: self.marks.get("%s|%s" % (host.lower(), log), now - self.window)
-                 for log in catalog.LOGS}
+                 for log in catalog.QUERIES}
         try:
             return self.fetch(host, since, local=is_local(host))
         except EventLogError as exc:
             return [], {"*": str(exc)}
 
-    def _store(self, host, events):
+    def _store(self, host, events, book=None):
         known = {event["key"] for event in self.events}
         added = 0
         for event in events:
+            query = event.get("query") or event.get("log")
             key = "%s|%s|%s" % (host.lower(), event.get("log"), event.get("record"))
-            mark = "%s|%s" % (host.lower(), event.get("log"))
+            mark = "%s|%s" % (host.lower(), query)
             self.marks[mark] = max(self.marks.get(mark, 0), event.get("time") or 0)
+            if query == catalog.LOGONS:
+                self._remember_logon(host, event, book or {})
+                continue
             if key in known:
                 continue
             known.add(key)
@@ -219,6 +232,41 @@ class EventCollector:
             self.events.append(event)
             added += 1
         return added
+
+    def _remember_logon(self, host, event, book):
+        """Вход в домен: с какого компьютера (по IP) и под каким пользователем."""
+        data = event.get("data") or {}
+        user = (data.get("TargetUserName") or "").strip()
+        if not user or user.endswith("$") or user.lower() == "krbtgt":
+            return  # учётные записи компьютеров и служебная — это не люди
+        address = catalog.DECODERS["ip"](data.get("IpAddress"))
+        # С ::1 входят на сам контроллер домена, с которого читаем журнал.
+        computer = book.get((host if address in ("::1", "127.0.0.1") else address).lower())
+        if not computer:
+            return
+        when = event.get("time") or 0
+        recent = self.logons.get(computer.lower(), [])
+        for entry in recent:
+            if entry["user"].lower() == user.lower():
+                if entry["time"] >= when:
+                    return
+                recent.remove(entry)
+                break
+        recent.append({"user": user, "domain": data.get("TargetDomainName") or "",
+                       "time": when, "address": address})
+        recent.sort(key=lambda entry: entry["time"])
+        self.logons[computer.lower()] = recent[-RECENT_USERS:]
+
+    def annotate(self, computers):
+        """Дописать в строки таблицы компьютеров, кто входил последним."""
+        with self._lock:
+            logons = {key: list(value) for key, value in self.logons.items()}
+        for record in computers:
+            recent = logons.get(record["name"].lower(), [])
+            last = recent[-1] if recent else {}
+            record.update(user=last.get("user", ""), user_time=last.get("time"),
+                          users=list(reversed(recent)))
+        return computers
 
     # ------------------------------------------------------- состояние
     def snapshot(self, limit=1000):
@@ -245,11 +293,13 @@ class EventCollector:
                        if isinstance(event, dict) and event.get("key")][-MAX_STORED:]
         self.marks = dict(state.get("marks", {}))
         self.sources = dict(state.get("sources", {}))
+        self.logons = dict(state.get("logons", {}))
 
     def _save_state(self):
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         temp = self.state_path.with_suffix(".tmp")
         temp.write_text(json.dumps({"events": self.events, "marks": self.marks,
-                                    "sources": self.sources}, ensure_ascii=False),
+                                    "sources": self.sources, "logons": self.logons},
+                                   ensure_ascii=False),
                         encoding="utf-8")
         os.replace(temp, self.state_path)
